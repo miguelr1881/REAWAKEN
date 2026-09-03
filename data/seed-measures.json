@@ -1,0 +1,51 @@
+{
+  "app": "gymtrack",
+  "kind": "seed-measures",
+  "source": "InBody270 · Vita Fuerte Fitness Center · ID 010426-1",
+  "measures": [
+    {
+      "id": "inbody-2026-04-01",
+      "at": "2026-04-01T07:00:00",
+      "values": {
+        "weight": 81.6, "smm": 35.2, "pbf": 23.6, "bfm": 19.2, "ffm": 62.4,
+        "bmi": 24.4, "tbw": 45.5, "protein": 12.3, "minerals": 4.55,
+        "visceral": 8, "whr": 0.91, "bmr": 1717, "smi": 7.9, "score": 72,
+        "intake": 2961, "idealWeight": 73.7, "weightCtrl": -7.9, "fatCtrl": -8.2,
+        "muscleCtrl": 0.3, "height": 183
+      }
+    },
+    {
+      "id": "inbody-2026-05-12",
+      "at": "2026-05-12T07:32:00",
+      "values": {
+        "weight": 83.6, "smm": 36.8, "pbf": 22.7, "bfm": 19.0, "ffm": 64.6,
+        "bmi": 25.0, "tbw": 47.2, "protein": 12.8, "minerals": 4.58,
+        "visceral": 8, "whr": 0.92, "bmr": 1766, "smi": 8.2, "score": 74,
+        "intake": 2996, "idealWeight": 76.1, "weightCtrl": -7.5, "fatCtrl": -7.5,
+        "muscleCtrl": 0, "height": 183
+      }
+    },
+    {
+      "id": "inbody-2026-06-18",
+      "at": "2026-06-18T06:55:00",
+      "values": {
+        "weight": 84.4, "smm": 37.3, "pbf": 22.6, "bfm": 19.1, "ffm": 65.3,
+        "bmi": 25.2, "tbw": 47.6, "protein": 13.1, "minerals": 4.59,
+        "visceral": 8, "whr": 0.93, "bmr": 1781, "smi": 8.3, "score": 75,
+        "intake": 3010, "idealWeight": 76.8, "weightCtrl": -7.6, "fatCtrl": -7.6,
+        "muscleCtrl": 0, "height": 183
+      }
+    },
+    {
+      "id": "inbody-2026-08-04",
+      "at": "2026-08-04T06:04:00",
+      "values": {
+        "weight": 86.7, "smm": 38.2, "pbf": 23.0, "bfm": 19.9, "ffm": 66.8,
+        "bmi": 25.9, "tbw": 48.7, "protein": 13.4, "minerals": 4.70,
+        "visceral": 8, "whr": 0.93, "bmr": 1813, "smi": 8.4, "score": 76,
+        "intake": 2551, "idealWeight": 78.6, "weightCtrl": -8.1, "fatCtrl": -8.1,
+        "muscleCtrl": 0, "height": 183
+      }
+    }
+  ]
+}

@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#000000" id="meta-theme-color" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" id="meta-status-bar" />
+<meta name="apple-mobile-web-app-title" content="Reawaken" />
+<meta name="description" content="Registro de entrenamiento y composición corporal" />
+<title>REAWAKEN</title>
+<script>
+  // Antes de pintar, para no ver un parpadeo oscuro al abrir en tema claro.
+  (function () {
+    try {
+      var pref = localStorage.getItem('theme') || 'auto';
+      var light = pref === 'light' ||
+        (pref === 'auto' && window.matchMedia('(prefers-color-scheme: light)').matches);
+      document.documentElement.dataset.theme = light ? 'light' : 'dark';
+      if (light) {
+        document.querySelector('#meta-theme-color').content = '#f2f2f7';
+        document.querySelector('#meta-status-bar').content = 'default';
+      }
+    } catch (e) { /* modo privado */ }
+  })();
+</script>
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="apple-touch-icon" href="icons/icon-180.png" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+
+<div class="aurora" id="aurora"></div>
+
+<div id="app">
+
+  <!-- ============ HOY ============ -->
+  <section class="view active" id="view-home">
+    <div class="page">
+      <div class="hero">
+        <p class="greet" id="greeting">Hola, Miguel</p>
+        <h1 class="title-xl">Entrenamiento</h1>
+        <p class="date" id="today-date"></p>
+        <div class="stats-row">
+          <div class="stat"><b id="stat-week">0</b><span>Esta semana</span></div>
+          <div class="stat"><b id="stat-total">0</b><span>Sesiones</span></div>
+          <div class="stat"><b id="stat-streak">0</b><span>Racha semanal</span></div>
+        </div>
+      </div>
+
+      <div id="resume-slot"></div>
+      <div id="routine-alert"></div>
+
+      <h2 class="section-title">Tu rutina · 5 días</h2>
+      <div class="day-list" id="day-list"></div>
+
+      <h2 class="section-title">Nota del entrenador</h2>
+      <div class="card" style="padding:15px 16px">
+        <p style="font-size:13.5px;line-height:1.55;color:var(--text-2)">
+          Cada semana subir pesos y al cardio aumentar 3 min.<br />
+          <span style="color:var(--text-3)">Deporte principal: fútbol · Coach: Anderson</span>
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ENTRENO ============ -->
+  <section class="view" id="view-workout">
+    <header class="workout-header">
+      <div class="wh-top">
+        <button class="icon-btn" id="btn-back" aria-label="Volver">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <div class="wh-title">
+          <strong id="wh-name">—</strong>
+          <small id="wh-sub">—</small>
+        </div>
+        <button class="icon-btn" id="btn-notes" aria-label="Nota del entrenamiento">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4h9l5 5v11H6z"/><path d="M14 4v6h6M9 14h7M9 17.5h5"/></svg>
+        </button>
+        <button class="icon-btn" id="btn-timer" aria-label="Temporizador">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 2h6"/></svg>
+        </button>
+      </div>
+      <div class="progress-track"><div class="progress-fill" id="wh-progress" style="width:0%"></div></div>
+    </header>
+
+    <div class="blocks" id="blocks"></div>
+
+    <div class="finish-bar">
+      <button class="btn btn-primary" id="btn-finish">Terminar entrenamiento</button>
+      <button class="btn btn-danger" id="btn-discard">Descartar sesión</button>
+    </div>
+  </section>
+
+  <!-- ============ STATS / INBODY ============ -->
+  <section class="view" id="view-body">
+    <div class="page">
+      <h1 class="title-xl">Stats</h1>
+      <p class="date" id="body-sub">—</p>
+      <div style="margin-top:20px" id="body-slot"></div>
+      <button class="btn btn-ghost" id="btn-add-measure" style="margin-top:18px">+ Nueva medición InBody</button>
+    </div>
+  </section>
+
+  <!-- ============ HISTORIAL ============ -->
+  <section class="view" id="view-history">
+    <div class="page">
+      <h1 class="title-xl">Historial</h1>
+      <p class="date" id="history-sub">—</p>
+      <div style="margin-top:20px" id="history-slot"></div>
+    </div>
+  </section>
+
+  <!-- ============ EDITOR DE RUTINA ============ -->
+  <section class="view" id="view-editor">
+    <header class="workout-header">
+      <div class="wh-top">
+        <button class="icon-btn" id="ed-cancel" aria-label="Cancelar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <div class="wh-title">
+          <strong>Editor de rutina</strong>
+          <small id="ed-sub">—</small>
+        </div>
+        <button class="icon-btn" id="ed-save" style="background:var(--green);color:#000" aria-label="Guardar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>
+        </button>
+      </div>
+    </header>
+    <div class="blocks" id="ed-body"></div>
+  </section>
+
+  <!-- ============ AJUSTES ============ -->
+  <section class="view" id="view-settings">
+    <div class="page">
+      <h1 class="title-xl">Ajustes</h1>
+      <div style="margin-top:20px" id="storage-notice"></div>
+
+      <h2 class="section-title">Apariencia</h2>
+      <div class="list-card">
+        <div class="list-row">
+          <div class="lr-icon" style="background:color-mix(in srgb, var(--brand) 22%, transparent);color:var(--brand)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+          </div>
+          <div class="lr-body"><strong>Tema</strong><small>Cómo se ve la app</small></div>
+        </div>
+        <div class="seg" id="theme-seg">
+          <button data-theme-opt="auto">Automático</button>
+          <button data-theme-opt="dark">Oscuro</button>
+          <button data-theme-opt="light">Claro</button>
+        </div>
+      </div>
+
+      <h2 class="section-title">Mi rutina</h2>
+      <div class="list-card">
+        <button class="list-row" id="btn-edit-routine">
+          <div class="lr-icon" style="background:color-mix(in srgb, #BF5AF2 22%, transparent);color:#BF5AF2">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg>
+          </div>
+          <div class="lr-body"><strong>Editar rutina actual</strong><small id="routine-summary">—</small></div>
+          <svg class="chev" width="8" height="14" viewBox="0 0 8 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 1l6 6-6 6"/></svg>
+        </button>
+        <button class="list-row" id="btn-import-routine">
+          <div class="lr-icon" style="background:color-mix(in srgb, #FF9F0A 22%, transparent);color:#FF9F0A">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16M4 12h16M4 19h10"/></svg>
+          </div>
+          <div class="lr-body"><strong>Importar rutina nueva</strong><small>Pega el plan que te dé el coach</small></div>
+          <svg class="chev" width="8" height="14" viewBox="0 0 8 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 1l6 6-6 6"/></svg>
+        </button>
+        <button class="list-row" id="btn-reset-routine">
+          <div class="lr-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 109-9 9 9 0 00-6.4 2.7L3 8"/><path d="M3 3v5h5"/></svg></div>
+          <div class="lr-body"><strong>Restaurar rutina original</strong><small>La del PDF de Anderson</small></div>
+        </button>
+      </div>
+
+      <h2 class="section-title">Sincronización</h2>
+      <div id="sync-slot"></div>
+
+      <h2 class="section-title">Respaldo</h2>
+      <div class="list-card">
+        <button class="list-row" id="btn-export">
+          <div class="lr-icon" style="background:color-mix(in srgb, #30D158 22%, transparent);color:#30D158">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></svg>
+          </div>
+          <div class="lr-body"><strong>Exportar respaldo</strong><small id="last-backup">Guarda un archivo .json en Archivos o iCloud</small></div>
+          <svg class="chev" width="8" height="14" viewBox="0 0 8 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 1l6 6-6 6"/></svg>
+        </button>
+        <button class="list-row" id="btn-import">
+          <div class="lr-icon" style="background:color-mix(in srgb, #0A84FF 22%, transparent);color:#0A84FF">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3M7 8l5-5 5 5M4 20h16"/></svg>
+          </div>
+          <div class="lr-body"><strong>Importar respaldo</strong><small>Restaura desde un archivo .json</small></div>
+          <svg class="chev" width="8" height="14" viewBox="0 0 8 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 1l6 6-6 6"/></svg>
+        </button>
+      </div>
+
+      <h2 class="section-title">Almacenamiento</h2>
+      <div class="list-card">
+        <div class="list-row">
+          <div class="lr-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg></div>
+          <div class="lr-body"><strong>Datos guardados</strong><small id="storage-info">Calculando…</small></div>
+        </div>
+        <button class="list-row" id="btn-wipe">
+          <div class="lr-icon" style="background:color-mix(in srgb, #FF453A 20%, transparent);color:#FF453A">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
+          </div>
+          <div class="lr-body"><strong style="color:#FF453A">Borrar todo</strong><small>Elimina todas las sesiones del dispositivo</small></div>
+        </button>
+      </div>
+
+      <h2 class="section-title">Plan</h2>
+      <div class="list-card">
+        <div class="list-row"><div class="lr-body"><strong>Miguel J Tung</strong><small>Coach Anderson · 5 días por semana</small></div></div>
+        <div class="list-row"><div class="lr-body"><strong>Cambio de rutina</strong><small id="routine-change">20 de octubre de 2026</small></div></div>
+      </div>
+
+      <p style="text-align:center;color:var(--text-3);font-size:12px;margin-top:26px">REAWAKEN · v1.1</p>
+    </div>
+  </section>
+
+</div>
+
+<!-- Temporizador de descanso -->
+<div class="rest-timer" id="rest-timer">
+  <div class="rt-ring">
+    <svg width="46" height="46" viewBox="0 0 46 46">
+      <circle cx="23" cy="23" r="19" fill="none" stroke="rgba(255,255,255,0.14)" stroke-width="4"/>
+      <circle id="rt-arc" cx="23" cy="23" r="19" fill="none" stroke="var(--day-accent,#0A84FF)" stroke-width="4" stroke-linecap="round" stroke-dasharray="119.4" stroke-dashoffset="0" transform="rotate(-90 23 23)"/>
+    </svg>
+    <span id="rt-num">45</span>
+  </div>
+  <div class="rt-info"><strong id="rt-title">Descanso</strong><small id="rt-label">Toca para ajustar</small></div>
+  <div class="rt-actions">
+    <button class="rt-chip" data-rest="45">45s</button>
+    <button class="rt-chip" data-rest="60">60s</button>
+    <button class="rt-chip" data-rest="90">90s</button>
+    <button class="rt-chip" id="rt-close">✕</button>
+  </div>
+</div>
+
+<!-- Hoja modal -->
+<div class="sheet-backdrop" id="sheet-backdrop" inert>
+  <div class="sheet" id="sheet"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- Tab bar -->
+<nav class="tabbar" id="tabbar">
+  <button class="tab active" data-view="home">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8M5 9.5V20h14V9.5"/></svg>
+    <span>Hoy</span>
+  </button>
+  <button class="tab" data-view="body">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 20v-6M12 20V5M18 20v-9"/></svg>
+    <span>Stats</span>
+  </button>
+  <button class="tab" data-view="history">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5l3 2"/><circle cx="12" cy="12" r="9"/></svg>
+    <span>Historial</span>
+  </button>
+  <button class="tab" data-view="settings">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 00.32 1.77l.06.06a2 2 0 11-2.83 2.83l-.06-.06A1.6 1.6 0 0015 19.4a1.6 1.6 0 00-1 1.47V21a2 2 0 11-4 0v-.09A1.6 1.6 0 009 19.4a1.6 1.6 0 00-1.77.32l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.6 1.6 0 004.6 15a1.6 1.6 0 00-1.47-1H3a2 2 0 110-4h.09A1.6 1.6 0 004.6 9a1.6 1.6 0 00-.32-1.77l-.06-.06a2 2 0 112.83-2.83l.06.06A1.6 1.6 0 009 4.6a1.6 1.6 0 001-1.47V3a2 2 0 114 0v.09A1.6 1.6 0 0015 4.6a1.6 1.6 0 001.77-.32l.06-.06a2 2 0 112.83 2.83l-.06.06A1.6 1.6 0 0019.4 9v0a1.6 1.6 0 001.47 1H21a2 2 0 110 4h-.09a1.6 1.6 0 00-1.47 1z"/></svg>
+    <span>Ajustes</span>
+  </button>
+</nav>
+
+<input type="file" id="file-input" accept="application/json,.json" hidden />
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
