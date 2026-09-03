@@ -42,11 +42,14 @@ export async function loadConfig() {
 }
 
 export async function saveConfig(url, anonKey) {
-  const clean = String(url || '').trim().replace(/\/+$/, '');
+  // El dashboard muestra la URL con "/rest/v1/" al final; aquí solo se usa la base.
+  const clean = String(url || '').trim()
+    .replace(/\/(rest|auth)\/v1\/?$/i, '')
+    .replace(/\/+$/, '');
   if (!/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(clean)) {
     throw new Error('La URL debe verse como https://xxxxx.supabase.co');
   }
-  if (!String(anonKey || '').trim()) throw new Error('Falta la clave anon');
+  if (!String(anonKey || '').trim()) throw new Error('Falta la clave');
   state.url = clean;
   state.anonKey = String(anonKey).trim();
   await db.setMeta('supabase', { url: state.url, anonKey: state.anonKey });
