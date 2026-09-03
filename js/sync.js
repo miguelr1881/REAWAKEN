@@ -42,16 +42,26 @@ export async function loadConfig() {
 }
 
 export async function saveConfig(url, anonKey) {
-  // El dashboard muestra la URL con "/rest/v1/" al final; aquí solo se usa la base.
-  const clean = String(url || '').trim()
-    .replace(/\/(rest|auth)\/v1\/?$/i, '')
-    .replace(/\/+$/, '');
-  if (!/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(clean)) {
-    throw new Error('La URL debe verse como https://xxxxx.supabase.co');
+  const raw = String(url || '').trim().replace(/\s+/g, '');
+  if (!raw) throw new Error('Falta la URL del proyecto');
+
+  // Se acepta la URL tal cual la muestra el dashboard, con o sin https, con o
+  // sin "/rest/v1/". Solo interesa el dominio.
+  let host;
+  try {
+    host = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).host;
+  } catch {
+    throw new Error(`No pude leer esa URL: "${raw.slice(0, 40)}"`);
   }
-  if (!String(anonKey || '').trim()) throw new Error('Falta la clave');
-  state.url = clean;
-  state.anonKey = String(anonKey).trim();
+  if (!/\.supabase\.(co|in)$/i.test(host)) {
+    throw new Error(`El dominio debe terminar en .supabase.co · recibí "${host}"`);
+  }
+
+  const key = String(anonKey || '').trim();
+  if (!key) throw new Error('Falta la clave publishable');
+
+  state.url = `https://${host.toLowerCase()}`;
+  state.anonKey = key;
   await db.setMeta('supabase', { url: state.url, anonKey: state.anonKey });
   emit();
 }
