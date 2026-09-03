@@ -1377,14 +1377,14 @@ function openSyncSetup() {
   openSheet(`
     <div class="grabber"></div>
     <h2>Conectar Supabase</h2>
-    <p>En tu proyecto: <b>Project Settings → API</b>. Copia la URL y la clave <b>anon public</b>. Antes corre el archivo <b>sql/schema.sql</b> en el SQL Editor.</p>
+    <p>En tu proyecto: <b>Project Settings → Data API</b> para la URL, y <b>API Keys</b> para la clave. Antes corre el archivo <b>sql/schema.sql</b> en el SQL Editor.</p>
     <div class="field" style="margin-bottom:10px">
       <label for="sb-url">Project URL</label>
       <input id="sb-url" placeholder="https://xxxxx.supabase.co" autocapitalize="off" autocorrect="off" spellcheck="false" style="font-size:15px" />
     </div>
     <div class="field" style="margin-bottom:16px">
-      <label for="sb-key">Clave anon public</label>
-      <input id="sb-key" placeholder="eyJhbGciOi…" autocapitalize="off" autocorrect="off" spellcheck="false" style="font-size:15px" />
+      <label for="sb-key">Publishable key</label>
+      <input id="sb-key" placeholder="sb_publishable_…" autocapitalize="off" autocorrect="off" spellcheck="false" style="font-size:15px" />
     </div>
     <button class="btn btn-primary" id="sb-save">Guardar</button>
     <button class="btn btn-ghost" id="sb-cancel">Cancelar</button>
