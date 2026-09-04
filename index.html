@@ -116,7 +116,7 @@
 
   <!-- ============ EDITOR DE RUTINA ============ -->
   <section class="view" id="view-editor">
-    <header class="workout-header">
+    <header class="workout-header ed-header">
       <div class="wh-top">
         <button class="icon-btn" id="ed-cancel" aria-label="Cancelar">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
@@ -125,12 +125,13 @@
           <strong>Editor de rutina</strong>
           <small id="ed-sub">—</small>
         </div>
-        <button class="icon-btn" id="ed-save" style="background:var(--green);color:#000" aria-label="Guardar">
+        <button class="icon-btn ed-save clean" id="ed-save" aria-label="Guardar rutina">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>
         </button>
       </div>
+      <div class="ed-tabs" id="ed-tabs" role="tablist"></div>
     </header>
-    <div class="blocks" id="ed-body"></div>
+    <div class="ed-body" id="ed-body"></div>
   </section>
 
   <!-- ============ AJUSTES ============ -->
