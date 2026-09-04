@@ -14,6 +14,8 @@ const state = {
   sessions: [],               // historial completo
   measures: [],               // mediciones InBody
   draft: null,                // rutina en edición
+  edDay: 0,                   // día visible en el editor
+  edDirty: false,             // el borrador tiene cambios sin guardar
   theme: 'auto',
   chartMetric: 'pbf',
   rest: { id: null, left: 0, total: 45 }
@@ -52,12 +54,21 @@ function fmtDuration(ms) {
   return `${Math.floor(min / 60)} h ${min % 60} min`;
 }
 
-function toast(msg) {
+/** `action` opcional: `{ label, fn }` pinta un botón dentro del toast (deshacer). */
+function toast(msg, action = null) {
   const el = $('#toast');
   el.textContent = msg;
+  el.classList.toggle('has-action', !!action);
+  if (action) {
+    const btn = document.createElement('button');
+    btn.className = 'toast-action';
+    btn.textContent = action.label;
+    btn.onclick = () => { el.classList.remove('show'); clearTimeout(el._t); action.fn(); };
+    el.append(btn);
+  }
   el.classList.add('show');
   clearTimeout(el._t);
-  el._t = setTimeout(() => el.classList.remove('show'), 2600);
+  el._t = setTimeout(() => el.classList.remove('show'), action ? 5000 : 2600);
 }
 
 function haptic() {
@@ -728,6 +739,7 @@ function openImportRoutine() {
     if (!days.length) return toast('No pude reconocer ningún día. Revisa el texto.');
     closeSheet();
     openEditor(days, warnings);
+    edTouch();  // lo interpretado todavía no existe en disco: salir sin guardar debe avisar
     toast(`${days.length} días interpretados · revísalos`);
   };
 }
@@ -735,141 +747,370 @@ function openImportRoutine() {
 function openEditor(days, warnings = []) {
   state.draft = JSON.parse(JSON.stringify(days));
   state.draftWarnings = warnings;
+  state.edDay = 0;
+  state.edDirty = false;
   renderEditor();
   setView('editor');
 }
 
+const ED_ICON = {
+  up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V6M6 12l6-6 6 6"/></svg>',
+  down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v13M6 12l6 6 6-6"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 7V5h4v2M6.5 7l.9 12.1A1 1 0 008.4 20h7.2a1 1 0 001-.9L17.5 7"/></svg>',
+  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>'
+};
+
+/** Día que se está editando ahora mismo. */
+const edDay = () => state.draft[state.edDay];
+
+function edTotals() {
+  let movements = 0, sets = 0;
+  for (const d of state.draft) {
+    for (const b of d.blocks) {
+      movements += b.movements.length;
+      sets += b.movements.length * (b.sets || 0);
+    }
+  }
+  return { movements, sets };
+}
+
+function edTouch() {
+  state.edDirty = true;
+  $('#ed-save').classList.remove('clean');
+  // Un cambio nuevo invalida el "deshacer" pendiente.
+  const t = $('#toast');
+  if (t.classList.contains('has-action')) { t.classList.remove('show'); clearTimeout(t._t); }
+}
+
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
 function renderEditor() {
-  const d = state.draft;
-  const totalMv = d.reduce((a, day) => a + day.blocks.reduce((b, bl) => b + bl.movements.length, 0), 0);
-  $('#ed-sub').textContent = `${d.length} días · ${totalMv} ejercicios`;
+  state.edDay = Math.min(Math.max(state.edDay || 0, 0), Math.max(state.draft.length - 1, 0));
+  renderEdHeader();
+  renderEdTabs();
+  renderEdDay();
+}
+
+function renderEdHeader() {
+  const t = edTotals();
+  $('#ed-sub').textContent = `${plural(state.draft.length, 'día', 'días')} · ${plural(t.movements, 'ejercicio', 'ejercicios')} · ${plural(t.sets, 'serie', 'series')}`;
+  $('#ed-save').classList.toggle('clean', !state.edDirty);
+}
+
+function renderEdTabs() {
+  $('#ed-tabs').innerHTML = state.draft.map((d, i) => `
+    <button class="ed-tab ${i === state.edDay ? 'on' : ''}" data-day-tab="${i}" role="tab" aria-selected="${i === state.edDay}">
+      ${esc(d.label || `Día ${i + 1}`)}
+    </button>`).join('') +
+    `<button class="ed-tab ed-tab-add" data-add-day aria-label="Agregar día">${ED_ICON.plus}</button>`;
+}
+
+function edMovementHtml(bi, mi, m, count) {
+  const p = `${bi}.${mi}`;
+  const hasNote = !!(m.note && m.note.trim());
+  return `
+    <article class="ed-mv" data-mv="${p}">
+      <div class="ed-mv-top">
+        <span class="ed-mvnum">${mi + 1}</span>
+        <input class="ed-name" data-path="m.${p}.name" value="${esc(m.name)}" placeholder="Nombre del ejercicio" />
+      </div>
+      <div class="ed-mv-row">
+        <label class="ed-field ed-field-reps"><span>Reps</span>
+          <input data-path="m.${p}.reps" value="${esc(m.reps)}" placeholder="10" />
+        </label>
+        <div class="ed-seg" data-kind="${p}">
+          <button data-k="weight" class="${m.kind === 'weight' ? 'on' : ''}">Peso</button>
+          <button data-k="check" class="${m.kind === 'check' ? 'on' : ''}">Check</button>
+        </div>
+        <div class="ed-tools">
+          <button class="ed-icon" data-move-mv="${p}" data-dir="-1" ${mi === 0 ? 'disabled' : ''} aria-label="Subir ejercicio">${ED_ICON.up}</button>
+          <button class="ed-icon" data-move-mv="${p}" data-dir="1" ${mi === count - 1 ? 'disabled' : ''} aria-label="Bajar ejercicio">${ED_ICON.down}</button>
+          <button class="ed-icon danger" data-del-mv="${p}" aria-label="Eliminar ejercicio">${ED_ICON.trash}</button>
+        </div>
+      </div>
+      <input class="ed-note ${hasNote ? '' : 'ed-hide'}" data-path="m.${p}.note" value="${esc(m.note || '')}" placeholder="Nota para este ejercicio" />
+      <button class="ed-note-add ${hasNote ? 'ed-hide' : ''}" data-note="${p}">+ Nota</button>
+    </article>`;
+}
+
+function renderEdDay() {
+  const day = edDay();
+  const body = $('#ed-body');
 
   const warn = state.draftWarnings?.length
-    ? `<div class="notice warn" style="margin-bottom:4px">
+    ? `<div class="notice warn ed-warn">
          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5M12 17.5v.5"/><circle cx="12" cy="12" r="9"/></svg>
          <div>${state.draftWarnings.map(w => esc(w)).join('<br>')}</div>
+         <button class="ed-warn-x" data-drop-warn aria-label="Ocultar aviso">✕</button>
        </div>`
     : '';
 
-  $('#ed-body').innerHTML = warn + d.map((day, di) => `
-    <div class="block">
-      <div class="ed-day-head">
-        <input class="ed-title" data-path="${di}.title" value="${esc(day.title)}" placeholder="Nombre del día" />
-        <button class="ed-del" data-del-day="${di}" aria-label="Eliminar día">✕</button>
+  if (!day) {
+    body.innerHTML = warn + `
+      <div class="empty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        <p>Tu rutina quedó vacía.<br />Agrega un día para empezar.</p>
+      </div>`;
+    return;
+  }
+
+  const mvCount = day.blocks.reduce((a, b) => a + b.movements.length, 0);
+  const setCount = day.blocks.reduce((a, b) => a + b.movements.length * (b.sets || 0), 0);
+
+  const blocks = day.blocks.map((b, bi) => `
+    <section class="ed-block" data-b="${bi}">
+      <header class="ed-block-head">
+        <span class="ed-bnum">Bloque ${bi + 1}</span>
+        <span class="ed-bmeta">${plural(b.movements.length, 'ejercicio', 'ejercicios')} · ${plural(b.sets, 'serie', 'series')}</span>
+        <div class="ed-tools">
+          <button class="ed-icon" data-move-block="${bi}" data-dir="-1" ${bi === 0 ? 'disabled' : ''} aria-label="Subir bloque">${ED_ICON.up}</button>
+          <button class="ed-icon" data-move-block="${bi}" data-dir="1" ${bi === day.blocks.length - 1 ? 'disabled' : ''} aria-label="Bajar bloque">${ED_ICON.down}</button>
+          <button class="ed-icon danger" data-del-block="${bi}" aria-label="Eliminar bloque">${ED_ICON.trash}</button>
+        </div>
+      </header>
+
+      <div class="ed-fields3">
+        <label class="ed-field"><span>Piso</span>
+          <input data-path="b.${bi}.floor" value="${esc(b.floor || '')}" placeholder="—" />
+        </label>
+        <label class="ed-field num"><span>Series</span>
+          <input data-path="b.${bi}.sets" value="${b.sets}" inputmode="numeric" placeholder="3" />
+        </label>
+        <label class="ed-field num"><span>Descanso</span>
+          <input data-path="b.${bi}.rest" value="${b.rest ?? ''}" inputmode="numeric" placeholder="seg" />
+        </label>
       </div>
-      <input class="ed-sub" data-path="${di}.subtitle" value="${esc(day.subtitle || '')}" placeholder="Grupo muscular" />
 
-      ${day.blocks.map((b, bi) => `
-        <div class="ed-block">
-          <div class="ed-block-head">
-            <input class="ed-mini" data-path="${di}.${bi}.floor" value="${esc(b.floor || '')}" placeholder="Piso" />
-            <input class="ed-mini" data-path="${di}.${bi}.sets" value="${b.sets}" inputmode="numeric" placeholder="Series" />
-            <input class="ed-mini" data-path="${di}.${bi}.rest" value="${b.rest ?? ''}" inputmode="numeric" placeholder="Rest s" />
-            <button class="ed-del" data-del-block="${di}.${bi}" aria-label="Eliminar bloque">✕</button>
-          </div>
-          ${b.movements.map((m, mi) => `
-            <div class="ed-mv">
-              <input class="ed-name" data-path="${di}.${bi}.${mi}.name" value="${esc(m.name)}" placeholder="Ejercicio" />
-              <input class="ed-reps" data-path="${di}.${bi}.${mi}.reps" value="${esc(m.reps)}" placeholder="Reps" />
-              <button class="ed-kind ${m.kind}" data-kind="${di}.${bi}.${mi}">${m.kind === 'weight' ? 'Peso' : 'Check'}</button>
-              <button class="ed-del" data-del-mv="${di}.${bi}.${mi}" aria-label="Eliminar ejercicio">✕</button>
-              <input class="ed-note" data-path="${di}.${bi}.${mi}.note" value="${esc(m.note || '')}" placeholder="Nota (opcional)" />
-            </div>`).join('')}
-          <button class="ed-add" data-add-mv="${di}.${bi}">+ Ejercicio</button>
-        </div>`).join('')}
+      <div class="ed-mvs">${b.movements.map((m, mi) => edMovementHtml(bi, mi, m, b.movements.length)).join('')}</div>
 
-      <button class="ed-add" data-add-block="${di}">+ Bloque</button>
-    </div>`).join('') + `
-    <button class="btn btn-ghost" id="ed-add-day">+ Agregar día</button>`;
+      <button class="ed-add" data-add-mv="${bi}">${ED_ICON.plus} Ejercicio</button>
+    </section>`).join('');
 
-  bindEditor();
+  body.innerHTML = warn + `
+    <div class="ed-day" key="${state.edDay}">
+      <div class="ed-card ed-day-card">
+        <div class="ed-daychip">${esc(day.label || `Día ${state.edDay + 1}`)}</div>
+        <label class="ed-field lg"><span>Nombre del día</span>
+          <input data-path="d.title" value="${esc(day.title)}" placeholder="Entrenamiento" />
+        </label>
+        <label class="ed-field"><span>Grupo muscular</span>
+          <input data-path="d.subtitle" value="${esc(day.subtitle || '')}" placeholder="Tren inferior, espalda…" />
+        </label>
+        <div class="ed-daystats">
+          <span><b>${day.blocks.length}</b> ${day.blocks.length === 1 ? 'bloque' : 'bloques'}</span>
+          <span><b>${mvCount}</b> ${mvCount === 1 ? 'ejercicio' : 'ejercicios'}</span>
+          <span><b>${setCount}</b> ${setCount === 1 ? 'serie' : 'series'}</span>
+        </div>
+      </div>
+
+      ${blocks}
+
+      <button class="ed-add ed-add-block" data-add-block>${ED_ICON.plus} Bloque</button>
+      <button class="ed-day-del" data-del-day>Eliminar este día</button>
+    </div>`;
 }
 
+/** Vuelve a pintar el día conservando el scroll: evita el salto al agregar o borrar. */
+function refreshEdDay() {
+  const y = window.scrollY;
+  renderEdHeader();
+  renderEdDay();
+  window.scrollTo({ top: y });
+}
+
+function edGoToDay(i) {
+  state.edDay = i;
+  renderEdTabs();
+  renderEdDay();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+/** Borrado con deshacer: nada del editor se pierde de un solo toque. */
+function edRemove(label, restore, remove) {
+  remove();
+  edTouch();
+  refreshEdDay();
+  toast(label, {
+    label: 'Deshacer',
+    fn: () => { restore(); edTouch(); refreshEdDay(); }
+  });
+}
+
+const newMovement = () => ({ id: uid(), name: '', reps: '10', kind: 'weight' });
+
 function bindEditor() {
-  const draft = state.draft;
-  const at = (path) => {
+  const body = $('#ed-body');
+
+  const resolve = (path) => {
     const p = path.split('.');
-    const day = draft[+p[0]];
-    if (p.length === 2) return { obj: day, key: p[1] };
-    const block = day.blocks[+p[1]];
-    if (p.length === 3) return { obj: block, key: p[2] };
-    return { obj: block.movements[+p[2]], key: p[3] };
+    const day = edDay();
+    if (p[0] === 'd') return { obj: day, key: p[1] };
+    if (p[0] === 'b') return { obj: day.blocks[+p[1]], key: p[2] };
+    return { obj: day.blocks[+p[1]].movements[+p[2]], key: p[3] };
   };
 
-  $$('#ed-body input[data-path]').forEach(inp => {
-    inp.addEventListener('input', () => {
-      const { obj, key } = at(inp.dataset.path);
-      if (key === 'sets' || key === 'rest') {
-        const n = parseInt(inp.value, 10);
-        obj[key] = Number.isFinite(n) ? n : (key === 'sets' ? 1 : undefined);
-      } else {
-        obj[key] = inp.value;
+  body.addEventListener('input', (e) => {
+    const path = e.target.dataset?.path;
+    if (!path) return;
+    const { obj, key } = resolve(path);
+
+    if (key === 'sets') {
+      const n = parseInt(e.target.value, 10);
+      obj.sets = Number.isFinite(n) ? Math.min(12, Math.max(1, n)) : 1;
+    } else if (key === 'rest') {
+      const n = parseInt(e.target.value, 10);
+      obj.rest = Number.isFinite(n) ? n : undefined;
+    } else if (key === 'floor') {
+      obj.floor = e.target.value.trim() || null;
+    } else {
+      obj[key] = e.target.value;
+      if (key === 'name') e.target.closest('.ed-mv')?.classList.remove('invalid');
+    }
+    edTouch();
+
+    // Los contadores dependen de series y ejercicios: se refrescan sin repintar.
+    if (key === 'sets') {
+      const block = e.target.closest('.ed-block');
+      const b = obj;
+      block.querySelector('.ed-bmeta').textContent =
+        `${plural(b.movements.length, 'ejercicio', 'ejercicios')} · ${plural(b.sets, 'serie', 'series')}`;
+      renderEdHeader();
+      updateEdDayStats();
+    }
+  });
+
+  body.addEventListener('click', (e) => {
+    const day = edDay();
+    const hit = (attr) => e.target.closest(`[${attr}]`);
+    let el;
+
+    if ((el = hit('data-drop-warn'))) {
+      state.draftWarnings = [];
+      $('.ed-warn')?.remove();
+      return;
+    }
+    if ((el = e.target.closest('.ed-seg button'))) {
+      const p = el.parentElement.dataset.kind.split('.');
+      const mv = day.blocks[+p[0]].movements[+p[1]];
+      if (mv.kind === el.dataset.k) return;
+      mv.kind = el.dataset.k;
+      el.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.k === mv.kind));
+      edTouch(); haptic();
+      return;
+    }
+    if ((el = hit('data-note'))) {
+      const input = el.previousElementSibling;
+      el.classList.add('ed-hide');
+      input.classList.remove('ed-hide');
+      input.focus();
+      return;
+    }
+    if ((el = hit('data-move-mv'))) {
+      const p = el.dataset.moveMv.split('.');
+      const list = day.blocks[+p[0]].movements;
+      const from = +p[1], to = from + Number(el.dataset.dir);
+      if (to < 0 || to >= list.length) return;
+      list.splice(to, 0, list.splice(from, 1)[0]);
+      edTouch(); haptic(); refreshEdDay();
+      return;
+    }
+    if ((el = hit('data-move-block'))) {
+      const from = +el.dataset.moveBlock, to = from + Number(el.dataset.dir);
+      if (to < 0 || to >= day.blocks.length) return;
+      day.blocks.splice(to, 0, day.blocks.splice(from, 1)[0]);
+      edTouch(); haptic(); refreshEdDay();
+      return;
+    }
+    if ((el = hit('data-del-mv'))) {
+      const p = el.dataset.delMv.split('.');
+      const list = day.blocks[+p[0]].movements;
+      const i = +p[1];
+      const item = list[i];
+      edRemove('Ejercicio eliminado', () => list.splice(i, 0, item), () => list.splice(i, 1));
+      return;
+    }
+    if ((el = hit('data-del-block'))) {
+      const i = +el.dataset.delBlock;
+      const item = day.blocks[i];
+      edRemove('Bloque eliminado', () => day.blocks.splice(i, 0, item), () => day.blocks.splice(i, 1));
+      return;
+    }
+    if (hit('data-del-day')) {
+      const i = state.edDay;
+      const item = state.draft[i];
+      state.draft.splice(i, 1);
+      state.edDay = Math.max(0, Math.min(i, state.draft.length - 1));
+      edTouch();
+      renderEditor();
+      window.scrollTo({ top: 0 });
+      toast('Día eliminado', {
+        label: 'Deshacer',
+        fn: () => { state.draft.splice(i, 0, item); state.edDay = i; edTouch(); renderEditor(); }
+      });
+      return;
+    }
+    if ((el = hit('data-add-mv'))) {
+      day.blocks[+el.dataset.addMv].movements.push(newMovement());
+      edTouch(); haptic(); refreshEdDay();
+      const mvs = $$(`.ed-block[data-b="${el.dataset.addMv}"] .ed-name`);
+      mvs.at(-1)?.focus();
+      return;
+    }
+    if (hit('data-add-block')) {
+      day.blocks.push({ id: uid(), floor: null, sets: 3, movements: [newMovement()] });
+      edTouch(); haptic(); refreshEdDay();
+      $$('.ed-block').at(-1)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  });
+
+  $('#ed-tabs').addEventListener('click', (e) => {
+    const tab = e.target.closest('[data-day-tab]');
+    if (tab) { haptic(); edGoToDay(+tab.dataset.dayTab); return; }
+    if (e.target.closest('[data-add-day]')) {
+      const n = state.draft.length + 1;
+      state.draft.push({
+        id: `d${n}`, label: `Día ${n}`, title: '', subtitle: '',
+        accent: DAY_ACCENTS[(n - 1) % DAY_ACCENTS.length],
+        blocks: [{ id: uid(), floor: null, sets: 3, movements: [newMovement()] }]
+      });
+      state.edDay = state.draft.length - 1;
+      edTouch(); haptic();
+      renderEditor();
+      window.scrollTo({ top: 0 });
+      $('.ed-day-card input')?.focus();
+    }
+  });
+}
+
+function updateEdDayStats() {
+  const day = edDay();
+  if (!day) return;
+  const stats = $('.ed-daystats');
+  if (!stats) return;
+  const mv = day.blocks.reduce((a, b) => a + b.movements.length, 0);
+  const sets = day.blocks.reduce((a, b) => a + b.movements.length * (b.sets || 0), 0);
+  stats.innerHTML = `<span><b>${day.blocks.length}</b> ${day.blocks.length === 1 ? 'bloque' : 'bloques'}</span>` +
+    `<span><b>${mv}</b> ${mv === 1 ? 'ejercicio' : 'ejercicios'}</span>` +
+    `<span><b>${sets}</b> ${sets === 1 ? 'serie' : 'series'}</span>`;
+}
+
+/** Marca los ejercicios sin nombre y salta al primero. Devuelve true si todo está bien. */
+function edValidate() {
+  for (let di = 0; di < state.draft.length; di++) {
+    for (const b of state.draft[di].blocks) {
+      if (b.movements.some(m => !m.name.trim())) {
+        if (state.edDay !== di) edGoToDay(di); else renderEdDay();
+        $$('#ed-body .ed-mv').forEach(el => {
+          const [bi, mi] = el.dataset.mv.split('.').map(Number);
+          if (!state.draft[di].blocks[bi].movements[mi].name.trim()) el.classList.add('invalid');
+        });
+        $('#ed-body .ed-mv.invalid')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        toast('Ponle nombre a los ejercicios marcados');
+        return false;
       }
-    });
-  });
-
-  $$('#ed-body .ed-kind').forEach(btn => {
-    btn.onclick = () => {
-      const p = btn.dataset.kind.split('.');
-      const mv = draft[+p[0]].blocks[+p[1]].movements[+p[2]];
-      mv.kind = mv.kind === 'weight' ? 'check' : 'weight';
-      btn.textContent = mv.kind === 'weight' ? 'Peso' : 'Check';
-      btn.className = `ed-kind ${mv.kind}`;
-    };
-  });
-
-  const rerender = () => renderEditor();
-
-  $$('#ed-body [data-del-mv]').forEach(b => {
-    b.onclick = () => {
-      const p = b.dataset.delMv.split('.');
-      draft[+p[0]].blocks[+p[1]].movements.splice(+p[2], 1);
-      rerender();
-    };
-  });
-  $$('#ed-body [data-del-block]').forEach(b => {
-    b.onclick = () => {
-      const p = b.dataset.delBlock.split('.');
-      draft[+p[0]].blocks.splice(+p[1], 1);
-      rerender();
-    };
-  });
-  $$('#ed-body [data-del-day]').forEach(b => {
-    b.onclick = async () => {
-      const ok = await confirmSheet({
-        title: 'Eliminar día', body: `Se quita "${draft[+b.dataset.delDay].title}" de la rutina.`,
-        confirm: 'Eliminar', cancel: 'Cancelar', danger: true
-      });
-      if (!ok) return;
-      draft.splice(+b.dataset.delDay, 1);
-      rerender();
-    };
-  });
-  $$('#ed-body [data-add-mv]').forEach(b => {
-    b.onclick = () => {
-      const p = b.dataset.addMv.split('.');
-      draft[+p[0]].blocks[+p[1]].movements.push({ id: uid(), name: '', reps: '10', kind: 'weight' });
-      rerender();
-    };
-  });
-  $$('#ed-body [data-add-block]').forEach(b => {
-    b.onclick = () => {
-      draft[+b.dataset.addBlock].blocks.push({
-        id: uid(), floor: null, sets: 3,
-        movements: [{ id: uid(), name: '', reps: '10', kind: 'weight' }]
-      });
-      rerender();
-    };
-  });
-  $('#ed-add-day').onclick = () => {
-    const n = draft.length + 1;
-    draft.push({
-      id: `d${n}`, label: `Día ${n}`, title: `Entrenamiento ${n}`, subtitle: '',
-      accent: DAY_ACCENTS[(n - 1) % DAY_ACCENTS.length],
-      blocks: [{ id: uid(), floor: null, sets: 3, movements: [{ id: uid(), name: '', reps: '10', kind: 'weight' }] }]
-    });
-    rerender();
-  };
+    }
+  }
+  return true;
 }
 
 /* ---------- Stats / InBody ---------- */
@@ -1588,19 +1829,23 @@ function bindGlobal() {
   };
 
   $('#ed-cancel').onclick = async () => {
-    const ok = await confirmSheet({
-      title: 'Salir sin guardar', body: 'Se pierden los cambios de la rutina.',
-      confirm: 'Salir', cancel: 'Seguir editando', danger: true
-    });
-    if (!ok) return;
+    if (state.edDirty) {
+      const ok = await confirmSheet({
+        title: 'Salir sin guardar', body: 'Se pierden los cambios de la rutina.',
+        confirm: 'Descartar cambios', cancel: 'Seguir editando', danger: true
+      });
+      if (!ok) return;
+    }
     state.draft = null;
     setView('settings'); renderSettings();
   };
 
   $('#ed-save').onclick = async () => {
+    if (!edValidate()) return;
     try {
       await saveRoutine(state.draft, 'Mi rutina');
       state.draft = null;
+      state.edDirty = false;
       setView('home'); renderHome();
       sync.syncQuietly();
       toast('Rutina guardada');
@@ -1608,6 +1853,7 @@ function bindGlobal() {
       toast(e.message);
     }
   };
+  bindEditor();
   $('#file-input').onchange = (e) => {
     const f = e.target.files?.[0];
     e.target.value = '';
