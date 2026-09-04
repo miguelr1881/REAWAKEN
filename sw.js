@@ -1,4 +1,4 @@
-const CACHE = 'reawaken-v6';
+const CACHE = 'reawaken-v7';
 const ASSETS = [
   './',
   './index.html',
