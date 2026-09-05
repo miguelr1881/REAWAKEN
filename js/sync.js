@@ -10,6 +10,7 @@
  */
 
 import { db } from './db.js';
+import { normalizeProfile } from './profile.js';
 
 const state = {
   url: null,
@@ -140,6 +141,9 @@ async function rest(table, { method = 'GET', query = '', body, prefer } = {}) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
+    if (table === 'routines' && /profile/i.test(err.message || '') && ['PGRST204', '42703'].includes(err.code)) {
+      throw new Error('Tu perfil está guardado en este dispositivo. Falta añadir routines.profile en Supabase para sincronizar. Consulta SUPABASE-PERFIL.md.');
+    }
     throw new Error(err.message || `Supabase respondió ${res.status}`);
   }
   return res.status === 204 ? null : res.json().catch(() => null);
@@ -160,6 +164,7 @@ const toRemote = {
   }),
   routines: (r, uid) => ({
     id: r.id, user_id: uid, name: r.name, days: r.days,
+    ...(r.profile ? { profile: normalizeProfile(r.profile) } : {}),
     active: Boolean(r.active), updated_at: r.updatedAt || Date.now()
   })
 };
@@ -178,7 +183,7 @@ const toLocal = {
     deletedAt: r.deleted_at ? Number(r.deleted_at) : undefined,
     updatedAt: Number(r.updated_at)
   }),
-  routines: (r) => ({ id: r.id, name: r.name, days: r.days || [], active: r.active, updatedAt: Number(r.updated_at) })
+  routines: (r) => ({ id: r.id, name: r.name, days: r.days || [], active: r.active, ...(r.profile ? { profile: normalizeProfile(r.profile) } : {}), updatedAt: Number(r.updated_at) })
 };
 
 const readers = {

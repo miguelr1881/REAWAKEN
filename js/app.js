@@ -4,8 +4,9 @@ import { INBODY_FIELDS, parseInBody, formatValue, consistency, fieldMeta } from 
 import { parseRoutineText, sanitizeRoutine, DAY_ACCENTS } from './routine-parser.js';
 import * as sync from './sync.js';
 import { MUSCLE_GROUPS, exerciseFocus, exerciseGroups, imageSearchUrl, muscleAtlas, dayFocus } from './exercise-info.js';
+import { normalizeProfile, validProfileDate, monthlyInBody } from './profile.js';
 
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.4.0';
 
 /* ============================== Estado ============================== */
 
@@ -13,6 +14,7 @@ const state = {
   view: 'home',
   routine: DEFAULT_ROUTINE,   // rutina activa
   routineId: null,
+  profile: normalizeProfile(),
   session: null,              // sesión activa (finishedAt === null)
   sessions: [],               // historial completo
   measures: [],               // mediciones InBody
@@ -23,6 +25,7 @@ const state = {
   chartMetric: 'pbf',
   viewScroll: {},
   restSeconds: 45,
+  multimediaAudio: false,
   rest: { id: null, left: 0, total: 45 }
 };
 
@@ -223,13 +226,15 @@ function renderHome() {
   $('#today-date').textContent = fmtDate(Date.now());
 
   const h = new Date().getHours();
-  $('#greeting').textContent = h < 12 ? 'Buenos días, Miguel' : h < 19 ? 'Buenas tardes, Miguel' : 'Buenas noches, Miguel';
+  $('#greeting').textContent = `${h < 12 ? 'Buenos días' : h < 19 ? 'Buenas tardes' : 'Buenas noches'}, ${state.profile.name.split(/\s+/)[0]}`;
+  $('#coach-credit').textContent = [state.profile.sport, state.profile.coach ? `Coach: ${state.profile.coach}` : ''].filter(Boolean).join(' · ');
+  renderInBodyReminder();
 
   const finished = state.sessions.filter(s => s.finishedAt);
-  $('#stat-week').textContent = `${finished.filter(s => s.startedAt >= weekStart(Date.now())).length}/${PROFILE.daysPerWeek}`;
+  $('#stat-week').textContent = `${finished.filter(s => s.startedAt >= weekStart(Date.now())).length}/${state.profile.daysPerWeek}`;
   $('#stat-total').textContent = finished.length;
   $('#stat-streak').textContent = calcWeekStreak(finished);
-  $('#stat-streak').parentElement.title = `Racha: semanas con al menos ${WEEK_GOAL} sesiones`;
+  $('#stat-streak').parentElement.title = `Racha: semanas con al menos ${state.profile.daysPerWeek} sesiones`;
   $('#routine-heading').textContent = `Tu rutina · ${state.routine.length} días`;
   const today = new Date().toDateString();
   $('#week-strip').innerHTML = ['L', 'K', 'M', 'J', 'V', 'S', 'D'].map((label, index) => {
@@ -323,7 +328,6 @@ function suggestNextDay(finished) {
  * 2 días de descanso, así que una racha diaria se rompería siempre.
  * La semana en curso no rompe la racha mientras no termine.
  */
-const WEEK_GOAL = 4;
 
 function weekStart(ts) {
   const d = new Date(ts);
@@ -341,9 +345,9 @@ function calcWeekStreak(finished) {
   }
   const cursor = new Date(weekStart(Date.now()));
   let streak = 0;
-  if ((byWeek.get(cursor.getTime()) || 0) >= WEEK_GOAL) streak++;
+  if ((byWeek.get(cursor.getTime()) || 0) >= state.profile.daysPerWeek) streak++;
   cursor.setDate(cursor.getDate() - 7);
-  while ((byWeek.get(cursor.getTime()) || 0) >= WEEK_GOAL) {
+  while ((byWeek.get(cursor.getTime()) || 0) >= state.profile.daysPerWeek) {
     streak++;
     cursor.setDate(cursor.getDate() - 7);
   }
@@ -553,38 +557,67 @@ function updateWorkoutHeader() {
 const REST_CIRC = 2 * Math.PI * 19;
 let countdownAudio = null;
 let countdownHideTimeout = null;
+const countdownTones = new Set();
+let previousAudioType = null;
+
+function restoreAudioType() {
+  if (previousAudioType === null) return;
+  try { navigator.audioSession.type = previousAudioType; } catch {}
+  previousAudioType = null;
+}
+
+function stopCountdownSound() {
+  for (const oscillator of countdownTones) {
+    try { oscillator.stop(); } catch {}
+  }
+  countdownTones.clear();
+  restoreAudioType();
+}
 
 function prepareCountdownAudio() {
   try {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass) return;
+    if (state.multimediaAudio && navigator.audioSession) {
+      try {
+        if (previousAudioType === null) previousAudioType = navigator.audioSession.type;
+        navigator.audioSession.type = 'playback';
+      } catch {}
+    }
     if (!countdownAudio || countdownAudio.state === 'closed') countdownAudio = new AudioContextClass();
-    if (countdownAudio.state !== 'running') countdownAudio.resume().catch(() => {});
-  } catch {}
+    if (countdownAudio.state !== 'running') return countdownAudio.resume().catch(() => { restoreAudioType(); });
+  } catch { restoreAudioType(); }
 }
 
 function playCountdownSound() {
-  if (countdownAudio?.state !== 'running') return;
+  if (countdownAudio?.state !== 'running') { restoreAudioType(); return; }
   try {
-    const oscillator = countdownAudio.createOscillator();
-    const gain = countdownAudio.createGain();
-    const now = countdownAudio.currentTime;
-    oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(880, now);
-    gain.gain.setValueAtTime(0, now);
-    gain.gain.linearRampToValueAtTime(0.06, now + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
-    gain.gain.linearRampToValueAtTime(0, now + 0.5);
-    oscillator.connect(gain);
-    gain.connect(countdownAudio.destination);
-    oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
-    oscillator.start(now);
-    oscillator.stop(now + 0.5);
-  } catch {}
+    for (let tone = 0; tone < 3; tone++) {
+      const oscillator = countdownAudio.createOscillator();
+      const gain = countdownAudio.createGain();
+      const now = countdownAudio.currentTime + tone * 0.65;
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(880, now);
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(0.06, now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+      gain.gain.linearRampToValueAtTime(0, now + 0.5);
+      oscillator.connect(gain);
+      gain.connect(countdownAudio.destination);
+      countdownTones.add(oscillator);
+      oscillator.onended = () => {
+        oscillator.disconnect(); gain.disconnect();
+        if (countdownTones.delete(oscillator) && !countdownTones.size) restoreAudioType();
+      };
+      oscillator.start(now);
+      oscillator.stop(now + 0.5);
+    }
+  } catch { stopCountdownSound(); }
 }
 
 function startCountdown(seconds, title, doneMsg, soundOnComplete = false) {
   seconds = Math.min(7200, Math.max(1, Math.round(Number(seconds) || 1)));
+  stopCountdownSound();
   if (soundOnComplete) prepareCountdownAudio();
   clearTimeout(countdownHideTimeout);
   state.rest.total = seconds;
@@ -650,6 +683,7 @@ function paintRest() {
 }
 
 function hideRest() {
+  stopCountdownSound();
   clearInterval(state.rest.id);
   clearTimeout(countdownHideTimeout);
   state.rest.running = false;
@@ -830,7 +864,8 @@ function showSessionDetail(id) {
 /** Aviso de cambio de rutina: aparece 14 días antes de la fecha del plan. */
 function renderRoutineAlert() {
   const slot = $('#routine-alert');
-  const target = new Date(PROFILE.routineChangeDate + 'T12:00:00').getTime();
+  if (!state.profile.routineChangeDate) { slot.innerHTML = ''; return; }
+  const target = new Date(state.profile.routineChangeDate + 'T12:00:00').getTime();
   const days = Math.ceil((target - Date.now()) / 86400000);
 
   if (days > 14) { slot.innerHTML = ''; return; }
@@ -926,6 +961,7 @@ const ROUTINE_ID = 'active';
 
 async function loadRoutine() {
   const saved = (await db.allRoutines()).find(r => r.id === ROUTINE_ID);
+  state.profile = normalizeProfile(saved?.profile);
   state.routineUpdatedAt = saved?.updatedAt || null;
   if (saved?.days?.length) {
     state.routine = sanitizeRoutine(saved.days);
@@ -946,7 +982,8 @@ async function saveRoutine(days, name) {
       await db.putSession(session);
     }
   }
-  await db.putRoutine({ id: ROUTINE_ID, name: name || 'Mi rutina', days: clean, active: true });
+  const saved = (await db.allRoutines()).find(r => r.id === ROUTINE_ID);
+  await db.putRoutine({ id: ROUTINE_ID, name: name || 'Mi rutina', days: clean, active: true, ...(saved?.profile ? { profile: saved.profile } : {}) });
   state.routineUpdatedAt = Date.now();
   state.routine = clean;
   state.routineId = ROUTINE_ID;
@@ -1401,6 +1438,7 @@ const ATTRS = [
 ];
 
 function renderBody() {
+  renderInBodyReminder();
   const list = state.measures;
   $('#body-sub').textContent = list.length
     ? `${list.length} ${list.length === 1 ? 'medición registrada' : 'mediciones registradas'}`
@@ -1420,12 +1458,12 @@ function renderBody() {
   const prev = list[list.length - 2];
   const score = latest.values.score;
   const weeklySessions = state.sessions.filter(session => session.finishedAt && session.startedAt >= weekStart(Date.now())).length;
-  const weekProgress = Math.min(100, Math.round(weeklySessions / PROFILE.daysPerWeek * 100));
+  const weekProgress = Math.min(100, Math.round(weeklySessions / state.profile.daysPerWeek * 100));
   const scoreDelta = Number.isFinite(score) && Number.isFinite(prev?.values.score) ? score - prev.values.score : null;
   const profileHtml = `<section class="player-status" aria-label="Estado físico y actividad">
-    <div class="player-heading"><div><span class="eyebrow">Perfil de entrenamiento</span><h2>${esc(PROFILE.name.split(' ')[0])}</h2><span class="player-sport">${esc(PROFILE.sport)}</span></div><div class="player-emblem" aria-label="Puntuación InBody ${Number.isFinite(score) ? score : 'sin datos'}"><span>INBODY</span><strong>${Number.isFinite(score) ? score : '—'}</strong><small>PUNTOS</small></div></div>
+    <div class="player-heading"><div><span class="eyebrow">Perfil de entrenamiento</span><h2>${esc(state.profile.name.split(/\s+/)[0])}</h2></div><div class="player-emblem" aria-label="Puntuación InBody ${Number.isFinite(score) ? score : 'sin datos'}"><span>INBODY</span><strong>${Number.isFinite(score) ? score : '—'}</strong><small>PUNTOS</small></div></div>
     <div class="player-reading"><span>${fmtDate(latest.at, { day: 'numeric', month: 'short', year: 'numeric' })}</span><span>${scoreDelta === null ? 'Sin comparación anterior' : `${scoreDelta > 0 ? '+' : ''}${scoreDelta} puntos vs. anterior`}</span></div>
-    <div class="weekly-mission"><div><h3>Objetivo semanal</h3><strong>${weeklySessions}<span> / ${PROFILE.daysPerWeek} sesiones</span></strong></div><div class="mission-track" role="progressbar" aria-label="Objetivo semanal de sesiones" aria-valuemin="0" aria-valuemax="${PROFILE.daysPerWeek}" aria-valuenow="${Math.min(weeklySessions, PROFILE.daysPerWeek)}"><span style="width:${weekProgress}%"></span></div></div>
+    <div class="weekly-mission"><div><h3>Objetivo semanal</h3><strong>${weeklySessions}<span> / ${state.profile.daysPerWeek} sesiones</span></strong></div><div class="mission-track" style="--mission-step:${100 / state.profile.daysPerWeek}%" role="progressbar" aria-label="Objetivo semanal de sesiones" aria-valuemin="0" aria-valuemax="${state.profile.daysPerWeek}" aria-valuenow="${Math.min(weeklySessions, state.profile.daysPerWeek)}"><span style="width:${weekProgress}%"></span></div></div>
   </section>`;
 
   const heroHtml = INBODY_FIELDS.filter(f => f.primary).map(f => {
@@ -1831,7 +1869,7 @@ async function buildBackup() {
     app: 'gymtrack',
     version: 3,
     exportedAt: new Date().toISOString(),
-    profile: PROFILE.name,
+    profile: state.profile.name,
     sessions: state.sessions,
     measures: state.measures,
     routines: await db.allRoutines()
@@ -2070,9 +2108,68 @@ async function forgetSync() {
 
 /* ---------- Ajustes ---------- */
 
+function renderInBodyReminder() {
+  const reminder = monthlyInBody(state.measures);
+  $('#inbody-reminder').innerHTML = reminder.due ? `<button class="routine-alert due" id="btn-inbody-reminder"><div><strong>Nuevo InBody · ${esc(fmtDate(reminder.next, { month: 'long' }))}</strong><small>Pendiente de este mes</small></div><span aria-hidden="true">+</span></button>` : '';
+  if ($('#btn-inbody-reminder')) $('#btn-inbody-reminder').onclick = openNewMeasure;
+  $('#inbody-schedule').textContent = reminder.due ? 'Cada día 1 · Pendiente este mes' : `Este mes registrado · Próximo: ${fmtDate(reminder.next, { day: 'numeric', month: 'long' })}`;
+}
+
+function openProfile(focusDate = false) {
+  const profile = state.profile;
+  openSheet(`<h2>Editar perfil</h2><form id="profile-form">
+    <div class="field-grid profile-fields">
+      <div class="field profile-wide"><label for="profile-name">Nombre</label><input id="profile-name" autocomplete="name" maxlength="80" required value="${esc(profile.name)}"></div>
+      <div class="field"><label for="profile-sport">Deporte</label><input id="profile-sport" maxlength="60" value="${esc(profile.sport)}"></div>
+      <div class="field"><label for="profile-coach">Entrenador</label><input id="profile-coach" maxlength="80" value="${esc(profile.coach)}"></div>
+      <div class="field"><label for="profile-days">Días por semana</label><input id="profile-days" type="number" inputmode="numeric" min="1" max="7" step="1" required value="${profile.daysPerWeek}"></div>
+      <div class="field"><label for="profile-date">Cambio de rutina</label><input id="profile-date" type="date" min="1900-01-01" max="2100-12-31" value="${profile.routineChangeDate}"></div>
+    </div><p id="profile-error" class="profile-error" role="alert"></p>
+    <div class="sheet-form-actions"><button type="submit" class="btn btn-primary" id="profile-save">Guardar</button><button type="button" class="btn btn-ghost" id="profile-cancel">Cancelar</button></div>
+  </form>`);
+  $('#profile-cancel').onclick = closeSheet;
+  const form = $('#profile-form');
+  const saveButton = $('#profile-save');
+  const errorLabel = $('#profile-error');
+  let saving = false;
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (saving) return;
+    const values = { name: $('#profile-name').value.trim(), sport: $('#profile-sport').value.trim(), coach: $('#profile-coach').value.trim(), daysPerWeek: Number($('#profile-days').value), routineChangeDate: $('#profile-date').value };
+    if (!values.name || !Number.isInteger(values.daysPerWeek) || values.daysPerWeek < 1 || values.daysPerWeek > 7 || (values.routineChangeDate && !validProfileDate(values.routineChangeDate))) {
+      errorLabel.textContent = 'Revisa el nombre, los días (1 a 7) y la fecha.';
+      return;
+    }
+    saving = true;
+    saveButton.disabled = true;
+    try {
+      const saved = (await db.allRoutines()).find(routine => routine.id === ROUTINE_ID);
+      const updated = normalizeProfile(values);
+      await db.putRoutine({ ...(saved || { id: ROUTINE_ID, name: 'Mi rutina', days: state.routine, active: true }), profile: updated });
+      state.profile = updated;
+      state.routineUpdatedAt = Date.now();
+      if ($('#profile-form') === form) closeSheet();
+      renderHome(); renderBody(); renderSettings();
+      toast('Perfil guardado');
+      sync.syncQuietly();
+    } catch (error) {
+      errorLabel.textContent = error.message || 'No se pudo guardar el perfil';
+    } finally {
+      saving = false;
+      saveButton.disabled = false;
+    }
+  };
+  if (focusDate) $('#profile-date').focus();
+}
+
 async function renderSettings() {
-  $('#settings-profile').innerHTML = `<div class="settings-monogram" aria-hidden="true">${esc(PROFILE.name.split(' ').map(part => part[0]).slice(0, 2).join(''))}</div><div><h2>${esc(PROFILE.name)}</h2><p>${esc(PROFILE.sport)} · Coach ${esc(PROFILE.coach)}</p></div><strong>${state.routine.length}<small>días</small></strong>`;
+  const profile = state.profile;
+  $('#settings-profile').innerHTML = `<span class="settings-monogram" aria-hidden="true">${esc(profile.name.split(/\s+/).map(part => part[0]).slice(0, 2).join(''))}</span><span class="settings-profile-copy"><strong>${esc(profile.name)}</strong><small>${esc([profile.sport, profile.coach ? `Coach ${profile.coach}` : ''].filter(Boolean).join(' · '))}</small></span><strong>${profile.daysPerWeek}<small>días/sem.</small></strong><svg class="profile-edit-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg>`;
+  renderInBodyReminder();
   const notice = $('#storage-notice');
+  $('#multimedia-audio').checked = state.multimediaAudio;
+  $('#multimedia-audio').disabled = !navigator.audioSession;
+  $('#audio-support').textContent = navigator.audioSession ? 'Experimental · Puede interrumpir tu música. No garantiza alarmas en segundo plano.' : 'Este navegador no ofrece Audio Session. Se mantiene el audio normal.';
   const standalone = isStandalone();
   const { persisted } = await requestPersistence();
 
@@ -2101,8 +2198,7 @@ async function renderSettings() {
     ? `${plural} · ${meas} · ${(est.usage / 1024).toFixed(0)} KB usados`
     : `${plural} · ${meas}`;
 
-  $('#routine-change').textContent = new Date(PROFILE.routineChangeDate + 'T12:00:00')
-    .toLocaleDateString('es-MX', { day: 'numeric', month: 'long', year: 'numeric' });
+  $('#routine-change').textContent = profile.routineChangeDate ? fmtDate(new Date(profile.routineChangeDate + 'T12:00:00'), { day: 'numeric', month: 'long', year: 'numeric' }) : 'Sin fecha programada';
 
   const mv = state.routine.reduce((a, d) => a + d.blocks.reduce((b, bl) => b + bl.movements.length, 0), 0);
   $('#routine-summary').textContent = `${state.routine.length} días · ${mv} ejercicios${state.routineUpdatedAt ? ` · Guardada ${fmtDate(state.routineUpdatedAt, { day: 'numeric', month: 'short' })}` : ' · Rutina inicial'}`;
@@ -2138,6 +2234,29 @@ async function seedMeasures() {
 }
 
 function bindGlobal() {
+  $('#settings-profile').onclick = () => openProfile();
+  $('#btn-routine-date').onclick = () => openProfile(true);
+  $('#btn-settings-inbody').onclick = openNewMeasure;
+  $('#multimedia-audio').onchange = async event => {
+    const enabled = event.target.checked;
+    try {
+      await db.setMeta('multimediaAudio', enabled);
+      state.multimediaAudio = enabled;
+      if (!enabled) stopCountdownSound();
+    } catch {
+      event.target.checked = state.multimediaAudio;
+      toast('No se pudo guardar la opción de audio');
+    }
+  };
+  $('#btn-test-audio').onclick = async () => {
+    const button = $('#btn-test-audio');
+    button.disabled = true;
+    stopCountdownSound();
+    await prepareCountdownAudio();
+    if (countdownAudio?.state === 'running') playCountdownSound();
+    else toast('El navegador no permitió reproducir audio');
+    button.disabled = false;
+  };
   if (window.visualViewport) {
     const resizeSheet = () => {
       const viewport = window.visualViewport;
@@ -2286,16 +2405,24 @@ function bindGlobal() {
   // Guardado defensivo al salir de la app (iOS puede matarla en segundo plano)
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') saveSession(true);
-    else tickCountdown();
+    else { tickCountdown(); renderInBodyReminder(); renderRoutineAlert(); }
   });
   window.addEventListener('pagehide', () => saveSession(true));
 
-  setInterval(() => { if (state.view === 'workout' && state.session) updateWorkoutHeader(); }, 30000);
+  let reminderDate = dateKey(Date.now());
+  setInterval(() => {
+    if (state.view === 'workout' && state.session) updateWorkoutHeader();
+    if (reminderDate !== dateKey(Date.now())) {
+      reminderDate = dateKey(Date.now());
+      renderInBodyReminder(); renderRoutineAlert();
+    }
+  }, 30000);
 }
 
 async function init() {
   await loadAll();
   await loadRoutine();
+  state.multimediaAudio = (await db.getMeta('multimediaAudio')) === true;
   applyTheme((await db.getMeta('theme')) || 'auto');
   await seedMeasures();
   bindGlobal();

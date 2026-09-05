@@ -27,9 +27,12 @@ create table if not exists public.routines (
   user_id    uuid not null references auth.users(id) on delete cascade,
   name       text not null,
   days       jsonb not null default '[]'::jsonb,
+  profile    jsonb,
   active     boolean not null default false,
   updated_at bigint not null
 );
+
+alter table public.routines add column if not exists profile jsonb;
 
 create index if not exists sessions_user_idx on public.sessions (user_id, started_at desc);
 create index if not exists measures_user_idx on public.measures (user_id, at desc);

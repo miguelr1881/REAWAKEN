@@ -1,10 +1,11 @@
-const CACHE = 'reawaken-v12';
+const CACHE = 'reawaken-v13';
 const ASSETS = [
   './',
   './index.html',
   './css/styles.css',
   './fonts/BarlowSemiCondensed-Bold.ttf',
   './js/app.js',
+  './js/profile.js',
   './js/exercise-info.js',
   './js/db.js',
   './js/routine.js',

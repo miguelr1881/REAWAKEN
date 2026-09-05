@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="es" data-build="2.3.0">
+<html lang="es" data-build="2.4.0">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -29,7 +29,7 @@
 <link rel="apple-touch-icon" href="icons/icon-180.png" />
 <link rel="icon" href="icons/icon-192.png" />
 <link rel="preload" href="fonts/BarlowSemiCondensed-Bold.ttf" as="font" type="font/ttf" crossorigin />
-<link rel="stylesheet" href="css/styles.css?v=2.3.0" />
+<link rel="stylesheet" href="css/styles.css?v=2.4.0" />
 </head>
 <body>
 
@@ -56,6 +56,7 @@
       <div id="resume-slot"></div>
       <div id="next-slot"></div>
       <div id="routine-alert"></div>
+      <div id="inbody-reminder"></div>
 
       <h2 class="section-title" id="routine-heading">Tu rutina</h2>
       <div class="day-list" id="day-list"></div>
@@ -64,7 +65,7 @@
       <div class="coach-note">
         <p style="font-size:13.5px;line-height:1.55;color:var(--text-2)">
           Cada semana subir pesos y al cardio aumentar 3 min.<br />
-          <span style="color:var(--text-3)">Deporte principal: fútbol · Coach: Anderson</span>
+          <span style="color:var(--text-3)" id="coach-credit"></span>
         </p>
       </div>
     </div>
@@ -142,7 +143,7 @@
   <section class="view" id="view-settings">
     <div class="page">
       <header class="section-masthead"><div><span class="eyebrow">REAWAKEN</span><h1 class="title-xl">Ajustes</h1></div><span class="section-index" aria-hidden="true">04</span></header>
-      <div class="settings-profile" id="settings-profile"></div>
+      <button class="settings-profile" id="settings-profile" aria-label="Editar perfil" title="Editar perfil"></button>
       <div style="margin-top:20px" id="storage-notice"></div>
 
       <h2 class="section-title">Apariencia</h2>
@@ -219,10 +220,17 @@
 
       <h2 class="section-title">Plan</h2>
       <div class="list-card">
-        <div class="list-row"><div class="lr-body"><strong>Cambio de rutina</strong><small id="routine-change">20 de octubre de 2026</small></div></div>
+        <button class="list-row" id="btn-routine-date"><div class="lr-body"><strong>Cambio de rutina</strong><small id="routine-change"></small></div><span aria-hidden="true">›</span></button>
+        <button class="list-row" id="btn-settings-inbody"><div class="lr-body"><strong>Nuevo InBody</strong><small id="inbody-schedule">Cada día 1</small></div><span aria-hidden="true">+</span></button>
       </div>
 
-      <div class="app-build"><span id="app-version">REAWAKEN · 2.3.0</span><button id="btn-check-update" class="btn btn-ghost">Buscar actualización</button><small id="update-status" role="status"></small></div>
+      <h2 class="section-title">Sonido de ejercicios</h2>
+      <div class="list-card">
+        <label class="list-row" for="multimedia-audio"><span class="lr-body"><strong>Audio multimedia en silencio</strong><small id="audio-support"></small></span><input id="multimedia-audio" type="checkbox" role="switch" /></label>
+        <button class="list-row" id="btn-test-audio"><span class="lr-body"><strong>Probar los tres tonos</strong><small>Volumen multimedia del dispositivo</small></span><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg></button>
+      </div>
+
+      <div class="app-build"><span id="app-version">REAWAKEN · 2.4.0</span><button id="btn-check-update" class="btn btn-ghost">Buscar actualización</button><small id="update-status" role="status"></small></div>
     </div>
   </section>
 
@@ -281,6 +289,6 @@
 
 <input type="file" id="file-input" accept="application/json,.json" hidden />
 
-<script type="module" src="js/app.js?v=2.3.0"></script>
+<script type="module" src="js/app.js?v=2.4.0"></script>
 </body>
 </html>
