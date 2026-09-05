@@ -3,6 +3,9 @@ import { db, requestPersistence, storageEstimate } from './db.js';
 import { INBODY_FIELDS, parseInBody, formatValue, consistency, fieldMeta } from './inbody.js';
 import { parseRoutineText, sanitizeRoutine, DAY_ACCENTS } from './routine-parser.js';
 import * as sync from './sync.js';
+import { MUSCLE_GROUPS, exerciseFocus, exerciseGroups, imageSearchUrl, muscleAtlas, dayFocus } from './exercise-info.js';
+
+const APP_VERSION = '2.3.0';
 
 /* ============================== Estado ============================== */
 
@@ -18,10 +21,14 @@ const state = {
   edDirty: false,             // el borrador tiene cambios sin guardar
   theme: 'auto',
   chartMetric: 'pbf',
+  viewScroll: {},
+  restSeconds: 45,
   rest: { id: null, left: 0, total: 45 }
 };
 
 const dayById = (id) => state.routine.find(d => d.id === id);
+const sessionDay = session => session?.routineSnapshot || dayById(session?.dayId);
+const recordedSet = value => value === true || (typeof value === 'string' && /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(value.trim()) && Number.isFinite(Number(value)));
 
 function findMovement(movementId) {
   for (const day of state.routine) {
@@ -89,7 +96,7 @@ function applyTheme(pref) {
   state.theme = pref;
   const light = pref === 'light' || (pref === 'auto' && prefersLight.matches);
   document.documentElement.dataset.theme = light ? 'light' : 'dark';
-  $('#meta-theme-color').setAttribute('content', light ? '#f2f2f7' : '#000000');
+  $('#meta-theme-color').setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--bg').trim());
   $('#meta-status-bar').setAttribute('content', light ? 'default' : 'black-translucent');
   // Espejo en localStorage para poder aplicar el tema antes de pintar en el siguiente arranque.
   try { localStorage.setItem('theme', pref); } catch { /* modo privado */ }
@@ -106,6 +113,7 @@ prefersLight.addEventListener('change', () => { if (state.theme === 'auto') appl
 /* ============================== Sesiones ============================== */
 
 function newSession(dayId) {
+  state.workoutScroll = 0;
   const day = dayById(dayId);
   const entries = {};
   for (const block of day.blocks) {
@@ -113,7 +121,7 @@ function newSession(dayId) {
       entries[mv.id] = Array.from({ length: block.sets }, () => (mv.kind === 'weight' ? '' : false));
     }
   }
-  return { id: uid(), dayId, startedAt: Date.now(), finishedAt: null, notes: '', entries };
+  return { id: uid(), dayId, routineSnapshot: JSON.parse(JSON.stringify(day)), startedAt: Date.now(), finishedAt: null, notes: '', entries };
 }
 
 /** Mejor peso registrado en este ejercicio, para marcar récords. */
@@ -130,7 +138,7 @@ function personalBest(movementId, excludeId) {
 }
 
 function sessionProgress(session) {
-  const day = dayById(session.dayId);
+  const day = sessionDay(session);
   if (!day) return { done: 0, total: 0, pct: 0 };
   let done = 0;
   const total = totalSets(day);
@@ -140,7 +148,7 @@ function sessionProgress(session) {
       const arr = session.entries[mv.id] || [];
       for (let i = 0; i < block.sets; i++) {
         const v = arr[i];
-        if (v === true || (typeof v === 'string' && v.trim() !== '')) done++;
+        if (recordedSet(v)) done++;
       }
     }
   }
@@ -170,14 +178,15 @@ let saveTimer = null;
 function saveSession(immediate = false) {
   if (!state.session) return;
   clearTimeout(saveTimer);
+  const session = state.session;
   const doSave = async () => {
-    await db.putSession(state.session);
-    const i = state.sessions.findIndex(s => s.id === state.session.id);
-    if (i >= 0) state.sessions[i] = { ...state.session };
-    else state.sessions.push({ ...state.session });
+    await db.putSession(session);
+    const i = state.sessions.findIndex(s => s.id === session.id);
+    if (i >= 0) state.sessions[i] = { ...session };
+    else state.sessions.push({ ...session });
   };
   if (immediate) return doSave();
-  saveTimer = setTimeout(doSave, 350);
+  saveTimer = setTimeout(() => doSave().catch(() => toast('No se pudo guardar. Revisa el almacenamiento.')), 350);
 }
 
 /** Última sesión terminada que registró este movimiento, para mostrar referencia. */
@@ -195,6 +204,8 @@ function lastPerformance(movementId, excludeId) {
 /* ============================== Vistas ============================== */
 
 function setView(name) {
+  state.viewScroll[state.view] = window.scrollY;
+  if (state.view === 'workout' && name !== 'workout') state.workoutScroll = window.scrollY;
   state.view = name;
   const fullscreen = name === 'workout' || name === 'editor';
   $$('.view').forEach(v => v.classList.toggle('active', v.id === `view-${name}`));
@@ -203,7 +214,7 @@ function setView(name) {
   document.body.classList.toggle('in-workout', fullscreen);
   closeSheet();
   if (name !== 'workout') hideRest();
-  window.scrollTo({ top: 0 });
+  window.scrollTo({ top: name === 'workout' ? state.workoutScroll || 0 : state.viewScroll[name] || 0 });
 }
 
 /* ---------- Home ---------- */
@@ -218,11 +229,20 @@ function renderHome() {
   $('#stat-week').textContent = `${finished.filter(s => s.startedAt >= weekStart(Date.now())).length}/${PROFILE.daysPerWeek}`;
   $('#stat-total').textContent = finished.length;
   $('#stat-streak').textContent = calcWeekStreak(finished);
+  $('#stat-streak').parentElement.title = `Racha: semanas con al menos ${WEEK_GOAL} sesiones`;
+  $('#routine-heading').textContent = `Tu rutina · ${state.routine.length} días`;
+  const today = new Date().toDateString();
+  $('#week-strip').innerHTML = ['L', 'K', 'M', 'J', 'V', 'S', 'D'].map((label, index) => {
+    const date = new Date(weekStart(Date.now()));
+    date.setDate(date.getDate() + index);
+    const done = finished.some(session => new Date(session.startedAt).toDateString() === date.toDateString());
+    return `<div class="week-day${done ? ' done' : ''}${date.toDateString() === today ? ' today' : ''}" aria-label="${esc(fmtDate(date))}${done ? ', entrenado' : ''}"><span>${label}</span><b>${done ? '✓' : date.getDate()}</b></div>`;
+  }).join('');
 
   // Banner de sesión en curso
   const slot = $('#resume-slot');
   if (state.session) {
-    const day = dayById(state.session.dayId);
+    const day = sessionDay(state.session);
     const p = sessionProgress(state.session);
     slot.innerHTML = day ? `
       <button class="resume-banner" id="btn-resume" style="width:100%;text-align:left">
@@ -239,10 +259,23 @@ function renderHome() {
   }
 
   const nextDayId = suggestNextDay(finished);
+  const next = dayById(nextDayId);
+  const focus = next ? dayFocus(next) : [];
+  $('#next-slot').innerHTML = !state.session && next ? `
+    <section class="next-workout">
+      <div class="next-kicker">Siguiente sesión · ${esc(next.label)}</div>
+      <div class="next-main"><div class="next-copy"><h2>${esc(next.title)}</h2>
+      <p>${esc(next.subtitle)}</p>
+      <div class="next-numbers"><strong>${next.blocks.reduce((count, block) => count + block.movements.length, 0)}<small>ejercicios</small></strong><strong>${totalSets(next)}<small>series</small></strong></div></div>
+      <div class="next-anatomy" aria-label="Enfoque muscular orientativo">${muscleAtlas(focus)}</div></div>
+      ${focus.length ? `<div class="next-focus">${focus.slice(0, 3).map(group => `<span>${MUSCLE_GROUPS[group]}</span>`).join('')}</div>` : ''}
+      <button class="btn btn-primary" id="btn-start-next"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>Empezar entrenamiento</button>
+    </section>` : '';
+  if ($('#btn-start-next')) $('#btn-start-next').onclick = () => startOrOpen(nextDayId);
 
   renderRoutineAlert();
 
-  $('#day-list').innerHTML = state.routine.map(day => {
+  $('#day-list').innerHTML = state.routine.map((day, dayIndex) => {
     const last = finished.filter(s => s.dayId === day.id).sort((a, b) => b.startedAt - a.startedAt)[0];
     const lastTxt = last
       ? `Última vez <em>${fmtDate(last.startedAt, { day: 'numeric', month: 'short' })}</em>`
@@ -258,6 +291,7 @@ function renderHome() {
     return `
       <button class="day-card" data-day="${day.id}">
         <div class="row">
+          <span class="day-index" aria-hidden="true">${String(dayIndex + 1).padStart(2, '0')}</span>
           <div style="flex:1;min-width:0">
             <div class="label">${esc(day.label)}${day.id === nextDayId ? '<span class="next-badge">Siguiente</span>' : ''}</div>
             <h3>${esc(day.title)}</h3>
@@ -279,7 +313,7 @@ function renderHome() {
 function suggestNextDay(finished) {
   if (state.session) return state.session.dayId;
   const last = finished.slice().sort((a, b) => b.startedAt - a.startedAt)[0];
-  if (!last) return PROFILE.firstDayId || state.routine[0].id;
+  if (!last) return dayById(PROFILE.firstDayId)?.id || state.routine[0]?.id;
   const i = state.routine.findIndex(d => d.id === last.dayId);
   return state.routine[(i + 1) % state.routine.length].id;
 }
@@ -319,11 +353,14 @@ function calcWeekStreak(finished) {
 /* ---------- Entreno ---------- */
 
 async function startOrOpen(dayId) {
+  if (state.startingSession) return;
+  state.startingSession = true;
+  try {
   if (state.session && state.session.dayId !== dayId) {
-    const day = dayById(state.session.dayId);
+    const day = sessionDay(state.session);
     const ok = await confirmSheet({
       title: 'Tienes una sesión abierta',
-      body: `${day.label} · ${day.title} sigue en curso. ¿Qué quieres hacer?`,
+      body: `${day?.label || 'Tu entrenamiento'} · ${day?.title || 'Sesión anterior'} sigue en curso. Empezar otra descartará la sesión abierta.`,
       confirm: 'Empezar la nueva',
       cancel: 'Seguir la actual'
     });
@@ -337,11 +374,17 @@ async function startOrOpen(dayId) {
     await saveSession(true);
   }
   openWorkout(dayId);
+  } catch (error) {
+    toast(error.message || 'No se pudo abrir el entrenamiento');
+  } finally {
+    state.startingSession = false;
+  }
 }
 
 function openWorkout(dayId) {
-  const day = dayById(dayId);
+  const day = state.session?.dayId === dayId ? sessionDay(state.session) : dayById(dayId);
   if (!day) return toast('Ese día ya no existe en tu rutina');
+  if (!state.session.routineSnapshot) state.session.routineSnapshot = JSON.parse(JSON.stringify(day));
   if (ensureEntries(state.session, day)) saveSession(true);
   $('#wh-name').textContent = `${day.label} · ${day.title}`;
   renderBlocks(day);
@@ -352,7 +395,9 @@ function openWorkout(dayId) {
 
 function renderBlocks(day) {
   const s = state.session;
-  $('#blocks').innerHTML = day.blocks.map(block => {
+  const focus = dayFocus(day);
+  const unassigned = day.blocks.flatMap(block => block.movements).filter(movement => exerciseFocus(movement) === 'none').length;
+  $('#blocks').innerHTML = `<section class="workout-focus" aria-label="Enfoque orientativo de esta sesión"><div><span class="eyebrow">${esc(day.label)} · Enfoque</span><h2>${esc(day.subtitle || day.title)}</h2><p>${focus.map(group => MUSCLE_GROUPS[group]).join(' · ') || 'Sin grupos asignados'}${unassigned ? `<br><span class="focus-unassigned">${unassigned} sin clasificar</span>` : ''}</p></div><div class="workout-atlas">${muscleAtlas(focus)}</div></section>` + day.blocks.map(block => {
     const floorLabel = block.floor ? `Piso ${block.floor}` : (block.tag || 'Bloque');
     const floorClass = block.floor ? '' : ' neutral';
     const movesHtml = block.movements.map(mv => {
@@ -378,11 +423,14 @@ function renderBlocks(day) {
 
       return `
         <div class="movement">
-          <button class="mv-head" data-history="${mv.id}">
+          <div class="mv-heading-row">
+          <button class="mv-head" data-muscle="${esc(mv.id)}" aria-label="Ver enfoque muscular de ${esc(mv.name)}">
             <div class="mv-name">${esc(mv.name)}</div>
-            <svg class="mv-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
-            <div class="mv-reps">${esc(mv.reps)}</div>
+            <div class="mv-subline"><span>${MUSCLE_GROUPS[exerciseFocus(mv)]}</span><span class="mv-reps">${esc(mv.reps)}</span></div>
           </button>
+          <button class="icon-btn mv-history" data-history="${esc(mv.id)}" aria-label="Historial de ${esc(mv.name)}" title="Historial del ejercicio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></button>
+          <a class="icon-btn exercise-search" href="${esc(imageSearchUrl(mv.name))}" target="_blank" rel="noopener noreferrer" aria-label="Buscar imágenes de ${esc(mv.name)}" title="Buscar imágenes en Google"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></a>
+          </div>
           ${mv.timer ? `<button class="mv-timer" data-timer="${mv.timer}" data-timer-name="${esc(mv.name)}">
               <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5z"/></svg>
               Cronometrar ${mv.timer} s
@@ -390,6 +438,7 @@ function renderBlocks(day) {
           ${mv.note ? `<div class="mv-note">${esc(mv.note)}</div>` : ''}
           ${last ? `<div class="mv-last">Última vez: <b>${esc(last.values.join(' · '))}</b></div>` : ''}
           <div class="sets">${setsHtml}</div>
+          ${mv.kind === 'weight' && (block.rest ?? state.restSeconds) > 0 ? `<button class="mv-rest" data-seconds="${block.rest ?? state.restSeconds}" aria-label="Descansar después de ${esc(mv.name)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="13" r="8"/><path d="M12 8v5l3 2M9 2h6"/></svg>Descansar ${block.rest ?? state.restSeconds} s</button>` : ''}
         </div>`;
     }).join('');
 
@@ -410,14 +459,20 @@ function renderBlocks(day) {
 }
 
 function bindSetHandlers(day) {
-  $$('#blocks .mv-head[data-history]').forEach(btn => {
+  $$('#blocks [data-muscle]').forEach(button => {
+    button.onclick = () => openExerciseInfo(day.blocks.flatMap(block => block.movements).find(movement => movement.id === button.dataset.muscle));
+  });
+  $$('#blocks .mv-rest').forEach(button => {
+    button.onclick = () => startRest(Number(button.dataset.seconds));
+  });
+  $$('#blocks [data-history]').forEach(btn => {
     btn.onclick = () => openMovementHistory(btn.dataset.history);
   });
 
   $$('#blocks .mv-timer').forEach(btn => {
     btn.onclick = () => {
       haptic();
-      startCountdown(+btn.dataset.timer, btn.dataset.timerName, '¡Tiempo! Siguiente ejercicio');
+      startCountdown(+btn.dataset.timer, btn.dataset.timerName, '¡Tiempo! Siguiente ejercicio', true);
     };
   });
 
@@ -442,8 +497,13 @@ function bindSetHandlers(day) {
       updateBlockState(findBlock(day, cell.dataset.mid));
     });
     input.addEventListener('blur', () => {
-      if (input.value.trim() !== '') { startRest(currentRestFor(day, cell.dataset.mid)); }
       saveSession(true);
+    });
+    input.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' || !recordedSet(input.value)) return;
+      event.preventDefault();
+      input.blur();
+      startRest(currentRestFor(day, cell.dataset.mid));
     });
   });
 
@@ -468,7 +528,7 @@ function findBlock(day, movementId) {
 }
 
 function currentRestFor(day, movementId) {
-  return findBlock(day, movementId)?.rest || state.rest.total || 45;
+  return findBlock(day, movementId)?.rest ?? state.restSeconds;
 }
 
 function updateBlockState(block) {
@@ -476,7 +536,7 @@ function updateBlockState(block) {
   const el = document.querySelector(`.block[data-block="${block.id}"]`);
   if (!el) return;
   const complete = block.movements.every(mv =>
-    (state.session.entries[mv.id] || []).every(v => v === true || (typeof v === 'string' && v.trim() !== ''))
+    (state.session.entries[mv.id] || []).slice(0, block.sets).every(recordedSet)
   );
   el.classList.toggle('complete', complete);
 }
@@ -491,41 +551,148 @@ function updateWorkoutHeader() {
 /* ---------- Temporizador (descanso y ejercicios cronometrados) ---------- */
 
 const REST_CIRC = 2 * Math.PI * 19;
+let countdownAudio = null;
+let countdownHideTimeout = null;
 
-function startCountdown(seconds, title, doneMsg) {
+function prepareCountdownAudio() {
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    if (!countdownAudio || countdownAudio.state === 'closed') countdownAudio = new AudioContextClass();
+    if (countdownAudio.state !== 'running') countdownAudio.resume().catch(() => {});
+  } catch {}
+}
+
+function playCountdownSound() {
+  if (countdownAudio?.state !== 'running') return;
+  try {
+    const oscillator = countdownAudio.createOscillator();
+    const gain = countdownAudio.createGain();
+    const now = countdownAudio.currentTime;
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(880, now);
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.06, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+    gain.gain.linearRampToValueAtTime(0, now + 0.5);
+    oscillator.connect(gain);
+    gain.connect(countdownAudio.destination);
+    oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
+    oscillator.start(now);
+    oscillator.stop(now + 0.5);
+  } catch {}
+}
+
+function startCountdown(seconds, title, doneMsg, soundOnComplete = false) {
+  seconds = Math.min(7200, Math.max(1, Math.round(Number(seconds) || 1)));
+  if (soundOnComplete) prepareCountdownAudio();
+  clearTimeout(countdownHideTimeout);
   state.rest.total = seconds;
   state.rest.left = seconds;
   state.rest.title = title;
+  state.rest.endsAt = Date.now() + seconds * 1000;
+  state.rest.doneMsg = doneMsg;
+  state.rest.soundOnComplete = soundOnComplete;
+  state.rest.running = true;
+  state.rest.paused = false;
   clearInterval(state.rest.id);
   $('#rt-title').textContent = title;
+  $('#rest-timer').dataset.mode = soundOnComplete ? 'exercise' : 'rest';
+  $('#rt-presets').hidden = soundOnComplete;
+  $('#rt-toggle').disabled = false;
+  $('#rest-timer').inert = false;
   $('#rest-timer').classList.add('show');
   paintRest();
-  state.rest.id = setInterval(() => {
-    state.rest.left--;
-    paintRest();
-    if (state.rest.left <= 0) {
-      clearInterval(state.rest.id);
-      $('#rt-label').textContent = doneMsg;
-      setTimeout(hideRest, 2500);
-    }
-  }, 1000);
+  state.rest.id = setInterval(tickCountdown, 200);
 }
 
-const startRest = (seconds) => startCountdown(seconds, 'Descanso', '¡Listo! Siguiente serie');
+function tickCountdown() {
+  if (!state.rest.running || state.rest.paused) return;
+  state.rest.left = Math.max(0, Math.ceil((state.rest.endsAt - Date.now()) / 1000));
+  paintRest();
+  if (state.rest.left > 0) return;
+  state.rest.running = false;
+  clearInterval(state.rest.id);
+  $('#rt-label').textContent = state.rest.doneMsg;
+  $('#rt-toggle').disabled = true;
+  if (state.rest.soundOnComplete) playCountdownSound();
+  countdownHideTimeout = setTimeout(hideRest, 3500);
+}
+
+function toggleCountdown() {
+  if (!state.rest.running) return;
+  if (state.rest.paused) {
+    if (state.rest.soundOnComplete) prepareCountdownAudio();
+    state.rest.endsAt = Date.now() + state.rest.remainingMs;
+    state.rest.paused = false;
+  } else {
+    tickCountdown();
+    if (!state.rest.running) return;
+    state.rest.remainingMs = Math.max(0, state.rest.endsAt - Date.now());
+    state.rest.paused = true;
+  }
+  paintRest();
+}
+
+function startRest(seconds) {
+  if (seconds <= 0) return;
+  startCountdown(seconds, 'Descanso', '¡Listo! Siguiente serie');
+}
 
 function paintRest() {
   $('#rt-num').textContent = Math.max(0, state.rest.left);
-  $('#rt-label').textContent = state.rest.left > 0 ? `de ${state.rest.total} s` : '¡Listo!';
+  $('#rt-label').textContent = state.rest.paused ? 'En pausa' : state.rest.left > 0 ? `de ${state.rest.total} s` : '¡Listo!';
+  $('#rt-toggle').setAttribute('aria-label', state.rest.paused ? 'Reanudar temporizador' : 'Pausar temporizador');
+  $('#rt-toggle').setAttribute('title', state.rest.paused ? 'Reanudar' : 'Pausar');
+  $('#rt-toggle').classList.toggle('paused', !!state.rest.paused);
   const ratio = Math.max(0, state.rest.left) / state.rest.total;
   $('#rt-arc').style.strokeDashoffset = String(REST_CIRC * (1 - ratio));
 }
 
 function hideRest() {
   clearInterval(state.rest.id);
+  clearTimeout(countdownHideTimeout);
+  state.rest.running = false;
+  state.rest.paused = false;
   $('#rest-timer').classList.remove('show');
+  $('#rest-timer').inert = true;
 }
 
 /* ---------- Historial ---------- */
+
+const dateKey = timestamp => {
+  const date = new Date(timestamp);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
+const historyState = { mode: 'calendar', month: new Date(new Date().getFullYear(), new Date().getMonth(), 1), selected: dateKey(Date.now()) };
+
+function historyCalendar(finished) {
+  const month = historyState.month;
+  const monthCount = finished.filter(session => new Date(session.startedAt).getFullYear() === month.getFullYear() && new Date(session.startedAt).getMonth() === month.getMonth()).length;
+  const first = new Date(month.getFullYear(), month.getMonth(), 1);
+  const offset = (first.getDay() + 6) % 7;
+  const counts = new Map();
+  finished.forEach(session => {
+    const key = dateKey(session.startedAt);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  const cells = Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(month.getFullYear(), month.getMonth(), index - offset + 1, 12);
+    const key = dateKey(date);
+    const count = counts.get(key) || 0;
+    const current = date.getMonth() === month.getMonth();
+    return `<button class="calendar-day${current ? '' : ' adjacent'}${key === dateKey(Date.now()) ? ' today' : ''}${count ? ' trained' : ''}" data-history-date="${key}" aria-pressed="${key === historyState.selected}" aria-label="${esc(fmtDate(date, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }))}, ${count} sesiones" ${key === dateKey(Date.now()) ? 'aria-current="date"' : ''}><span>${date.getDate()}</span><i aria-hidden="true">${count > 1 ? count : count ? '•' : ''}</i></button>`;
+  }).join('');
+  return `<section class="history-calendar" aria-label="Calendario de entrenamientos">
+    <div class="calendar-heading">
+      <button class="icon-btn" data-month-step="-1" aria-label="Mes anterior" title="Mes anterior"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 6-6 6 6 6"/></svg></button>
+      <label class="calendar-month"><span>${esc(fmtDate(month, { month: 'long', year: 'numeric' }))}</span><input type="month" id="history-month" value="${dateKey(month).slice(0, 7)}" min="1900-01" max="2100-12" aria-label="Elegir mes y año" /></label>
+      <button class="icon-btn" data-month-step="1" aria-label="Mes siguiente" title="Mes siguiente"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 6 6 6-6 6"/></svg></button>
+    </div>
+    <div class="calendar-grid"><div class="calendar-weekday" aria-label="Lunes">L</div><div class="calendar-weekday" aria-label="Martes">K</div><div class="calendar-weekday" aria-label="Miércoles">M</div><div class="calendar-weekday">J</div><div class="calendar-weekday">V</div><div class="calendar-weekday">S</div><div class="calendar-weekday">D</div>${cells}</div>
+    <div class="calendar-footer"><span>${monthCount} ${monthCount === 1 ? 'sesión' : 'sesiones'} este mes</span><button id="history-today">Hoy</button></div>
+  </section>`;
+}
 
 function renderHistory() {
   const finished = state.sessions.filter(s => s.finishedAt).sort((a, b) => b.startedAt - a.startedAt);
@@ -534,74 +701,129 @@ function renderHistory() {
     : 'Aún sin entrenamientos';
 
   const slot = $('#history-slot');
-  if (!finished.length) {
-    slot.innerHTML = `
-      <div class="empty">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9v6M18 9v6M3 10.5v3M21 10.5v3M6 12h12"/></svg>
-        <p>Cuando termines tu primer entrenamiento<br />aparecerá aquí tu historial.</p>
-      </div>`;
-    return;
-  }
-
-  slot.innerHTML = `<div class="list-card">${finished.map(s => {
-    const day = dayById(s.dayId);
+  const calendar = historyState.mode === 'calendar';
+  const period = calendar ? finished.filter(session => dateKey(session.startedAt).slice(0, 7) === dateKey(historyState.month).slice(0, 7)) : finished;
+  const minutes = Math.round(period.reduce((total, session) => total + Math.max(0, session.finishedAt - session.startedAt), 0) / 60000);
+  const summary = `<div class="history-totals" aria-label="${calendar ? 'Resumen del mes' : 'Resumen completo'}"><div><strong>${period.length}</strong><span>Sesiones${calendar ? ' del mes' : ''}</span></div><div><strong>${new Set(period.map(session => dateKey(session.startedAt))).size}</strong><span>Días activos</span></div><div><strong>${minutes}</strong><span>Minutos</span></div></div>`;
+  const visible = calendar ? finished.filter(session => dateKey(session.startedAt) === historyState.selected) : finished;
+  slot.innerHTML = `${summary}<div class="history-switch seg" role="group" aria-label="Vista del historial"><button data-history-mode="calendar" class="${calendar ? 'on' : ''}" aria-pressed="${calendar}">Calendario</button><button data-history-mode="list" class="${calendar ? '' : 'on'}" aria-pressed="${!calendar}">Todas las sesiones</button></div>
+    ${calendar ? historyCalendar(finished) : ''}
+    <h2 class="section-title history-date" id="history-date-title">${calendar ? esc(fmtDate(new Date(`${historyState.selected}T12:00:00`), { weekday: 'long', day: 'numeric', month: 'long' })) : 'Sesiones completadas'}</h2>
+    <div aria-labelledby="history-date-title">${visible.length ? `<div class="list-card">${visible.map(s => {
+    const day = sessionDay(s);
     const p = sessionProgress(s);
     const dur = s.finishedAt ? fmtDuration(s.finishedAt - s.startedAt) : '';
     return `
       <button class="history-item" data-session="${esc(s.id)}" style="width:100%;background:none">
-        <span class="hi-dot" style="background:var(--brand)"></span>
+        <span class="history-stamp" aria-hidden="true"><b>${new Date(s.startedAt).getDate()}</b><small>${esc(fmtDate(s.startedAt, { month: 'short' }))}</small></span>
         <span class="hi-body">
           <strong>${esc(day?.title || 'Sesión')}</strong>
           <small>${fmtDate(s.startedAt, { weekday: 'short', day: 'numeric', month: 'short' })} · ${dur}</small>
         </span>
-        <span class="hi-pct" style="color:${p.pct >= 80 ? 'var(--green)' : 'var(--text-2)'}">${p.pct}%</span>
+        <span class="hi-pct" style="color:${p.pct >= 80 ? 'var(--green)' : 'var(--text-2)'}">${day ? `${p.pct}%` : 'Ver'}</span>
       </button>`;
-  }).join('')}</div>`;
+  }).join('')}</div>` : `<div class="history-empty"><p>${calendar ? 'Sin entrenamientos registrados este día.' : 'Aún no hay sesiones completadas.'}</p></div>`}</div>`;
 
   $$('.history-item').forEach(el => { el.onclick = () => showSessionDetail(el.dataset.session); });
+  slot.onkeydown = event => {
+    const button = event.target.closest('[data-history-date]');
+    const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 }[event.key];
+    if (!button || !step) return;
+    event.preventDefault();
+    const date = new Date(`${button.dataset.historyDate}T12:00:00`);
+    date.setDate(date.getDate() + step);
+    if (date.getFullYear() < 1900 || date.getFullYear() > 2100) return;
+    historyState.month = new Date(date.getFullYear(), date.getMonth(), 1);
+    historyState.selected = dateKey(date);
+    renderHistory();
+    $(`[data-history-date="${historyState.selected}"]`)?.focus({ preventScroll: true });
+  };
+  $$('[data-history-mode]').forEach(button => {
+    button.onclick = () => { historyState.mode = button.dataset.historyMode; renderHistory(); $(`[data-history-mode="${historyState.mode}"]`).focus({ preventScroll: true }); };
+  });
+  $$('[data-history-date]').forEach(button => {
+    button.onclick = () => {
+      historyState.selected = button.dataset.historyDate;
+      const selected = new Date(`${historyState.selected}T12:00:00`);
+      historyState.month = new Date(selected.getFullYear(), selected.getMonth(), 1);
+      renderHistory();
+      $(`[data-history-date="${historyState.selected}"]`)?.focus({ preventScroll: true });
+    };
+  });
+  $$('[data-month-step]').forEach(button => {
+    button.onclick = () => {
+      const target = new Date(historyState.month.getFullYear(), historyState.month.getMonth() + Number(button.dataset.monthStep), 1);
+      if (target.getFullYear() < 1900 || target.getFullYear() > 2100) return;
+      historyState.month = target;
+      historyState.selected = dateKey(target);
+      renderHistory();
+      $(`[data-month-step="${button.dataset.monthStep}"]`)?.focus({ preventScroll: true });
+    };
+  });
+  if ($('#history-month')) $('#history-month').onchange = event => {
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(event.target.value) || !event.target.validity.valid) return;
+    historyState.month = new Date(`${event.target.value}-01T12:00:00`);
+    historyState.selected = dateKey(historyState.month);
+    renderHistory();
+    $('#history-month').focus({ preventScroll: true });
+  };
+  if ($('#history-today')) $('#history-today').onclick = () => {
+    historyState.month = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    historyState.selected = dateKey(Date.now());
+    renderHistory();
+    $('#history-today').focus({ preventScroll: true });
+  };
 }
 
 function showSessionDetail(id) {
   const s = state.sessions.find(x => x.id === id);
   if (!s) return;
-  const day = dayById(s.dayId);
-  if (!day) return toast('Esa sesión es de una rutina anterior');
+  const day = sessionDay(s);
   const p = sessionProgress(s);
 
-  const rows = day.blocks.flatMap(b => b.movements.map(mv => {
+  const blocks = day?.blocks || [{ sets: 0, movements: Object.keys(s.entries || {}).filter(key => !key.startsWith('_')).map((key, index) => ({ id: key, name: `Ejercicio ${index + 1}`, kind: (s.entries[key] || []).some(value => typeof value === 'string') ? 'weight' : 'check' })) }];
+  const rows = blocks.map((block, index) => `<section class="session-block"><h3>${esc(block.tag || `Bloque ${index + 1}`)}${block.floor ? ` · Piso ${esc(block.floor)}` : ''}</h3><p class="session-block-meta">${block.sets ? `${block.sets} ${block.sets === 1 ? 'serie' : 'series'}` : 'Registros disponibles'}${block.rest ? ` · Descanso ${block.rest} s` : ''}</p>${block.note ? `<p class="session-note">${esc(block.note)}</p>` : ''}${block.movements.map(mv => {
     const vals = s.entries[mv.id] || [];
-    const txt = mv.kind === 'weight'
-      ? (vals.filter(v => typeof v === 'string' && v.trim()).join(' · ') || '—')
-      : `${vals.filter(v => v === true).length}/${vals.length} ✓`;
-    return `<div style="display:flex;gap:10px;padding:9px 0;border-bottom:1px solid var(--stroke)">
-        <span style="flex:1;font-size:14px">${esc(mv.name)}</span>
-        <span style="font-size:13px;font-weight:700;color:var(--text-2);font-variant-numeric:tabular-nums">${esc(txt)}</span>
-      </div>`;
-  })).join('');
+    const sets = Array.from({ length: Math.max(block.sets, vals.length) }, (_, setIndex) => {
+      const value = vals[setIndex];
+      const done = recordedSet(value);
+      return `<div class="session-set${done ? ' done' : ''}"><small>Serie ${setIndex + 1}</small><b>${mv.kind === 'weight' ? done ? esc(value) : '—' : done ? '✓' : '—'}</b><span>${done ? 'Registrada' : 'Sin registrar'}</span></div>`;
+    }).join('');
+    return `<div class="session-movement"><h4>${esc(mv.name)}</h4><p>${esc(mv.reps || '')}${mv.timer ? ` · ${mv.timer} s` : ''}</p>${mv.note ? `<p class="session-note">${esc(mv.note)}</p>` : ''}<div class="session-sets">${sets}</div></div>`;
+  }).join('')}</section>`).join('');
 
   openSheet(`
     <div class="grabber"></div>
-    <h2>${esc(day.title)}</h2>
+    <h2>${esc(day?.title || 'Entrenamiento anterior')}</h2>
     <p>${fmtDate(s.startedAt)} · ${fmtDuration(s.finishedAt - s.startedAt)}</p>
+    ${!s.routineSnapshot ? '<p class="session-legacy">Esta sesión no conserva una copia original de su rutina. Los datos disponibles pueden no reflejar el plan de ese día.</p>' : ''}
     <div class="summary-grid">
-      <div><b>${p.done}</b><span>Series</span></div>
-      <div><b>${p.pct}%</b><span>Completado</span></div>
-      <div><b>${esc(day.label.replace('Día ', 'D'))}</b><span>Rutina</span></div>
+      <div><b>${day ? p.done : Object.values(s.entries || {}).filter(Array.isArray).flat().filter(recordedSet).length}</b><span>Series</span></div>
+      <div><b>${day ? `${p.pct}%` : '—'}</b><span>Completado</span></div>
+      <div><b>${esc(day?.label?.replace('Día ', 'D') || '—')}</b><span>Rutina</span></div>
     </div>
     ${s.notes ? `<div class="block-note" style="margin-bottom:16px">${esc(s.notes)}</div>` : ''}
     <div style="margin-bottom:18px">${rows}</div>
-    <button class="btn btn-danger" id="sheet-delete">Eliminar esta sesión</button>
     <button class="btn btn-ghost" id="sheet-close">Cerrar</button>
+    <button class="session-delete" id="sheet-delete">Eliminar sesión</button>
   `);
 
   $('#sheet-close').onclick = closeSheet;
   $('#sheet-delete').onclick = async () => {
+    const confirmed = await confirmSheet({ title: 'Eliminar sesión', body: 'Se eliminará este entrenamiento. El cambio también se enviará a tus dispositivos al sincronizar.', confirm: 'Eliminar', cancel: 'Conservar', danger: true });
+    if (!confirmed) return;
     await db.deleteSession(id);
     state.sessions = state.sessions.filter(x => x.id !== id);
     closeSheet();
     renderHistory();
     renderHome();
-    toast('Sesión eliminada');
+    toast('Sesión eliminada', { label: 'Deshacer', fn: async () => {
+      const restored = { ...s };
+      delete restored.deletedAt;
+      await db.putSession(restored);
+      state.sessions.push(restored);
+      renderHistory(); renderHome();
+    } });
   };
 }
 
@@ -704,6 +926,7 @@ const ROUTINE_ID = 'active';
 
 async function loadRoutine() {
   const saved = (await db.allRoutines()).find(r => r.id === ROUTINE_ID);
+  state.routineUpdatedAt = saved?.updatedAt || null;
   if (saved?.days?.length) {
     state.routine = sanitizeRoutine(saved.days);
     state.routineId = saved.id;
@@ -715,7 +938,16 @@ async function loadRoutine() {
 async function saveRoutine(days, name) {
   const clean = sanitizeRoutine(days);
   if (!clean.length) throw new Error('La rutina quedó vacía');
+  await saveSession(true);
+  for (const session of state.sessions) {
+    const original = dayById(session.dayId);
+    if (!session.routineSnapshot && original) {
+      session.routineSnapshot = JSON.parse(JSON.stringify(original));
+      await db.putSession(session);
+    }
+  }
   await db.putRoutine({ id: ROUTINE_ID, name: name || 'Mi rutina', days: clean, active: true });
+  state.routineUpdatedAt = Date.now();
   state.routine = clean;
   state.routineId = ROUTINE_ID;
 }
@@ -754,6 +986,7 @@ function openEditor(days, warnings = []) {
 }
 
 const ED_ICON = {
+  copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4H4v12h4"/></svg>',
   up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V6M6 12l6-6 6 6"/></svg>',
   down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v13M6 12l6 6 6-6"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 7V5h4v2M6.5 7l.9 12.1A1 1 0 008.4 20h7.2a1 1 0 001-.9L17.5 7"/></svg>',
@@ -805,22 +1038,38 @@ function renderEdTabs() {
     `<button class="ed-tab ed-tab-add" data-add-day aria-label="Agregar día">${ED_ICON.plus}</button>`;
 }
 
+function openExerciseInfo(movement) {
+  if (!movement) return;
+  const group = exerciseFocus(movement);
+  const secondary = exerciseGroups(movement).filter(key => key !== group);
+  openSheet(`<div class="exercise-info">
+    <div class="eyebrow">${movement.muscleGroup && movement.muscleGroup !== 'none' ? 'Enfoque asignado' : 'Enfoque orientativo'}</div>
+    <h2>${esc(movement.name)}</h2>
+    <div class="anatomy-stage">${muscleAtlas(exerciseGroups(movement))}</div>
+    <h3>${MUSCLE_GROUPS[group]}</h3>
+    ${secondary.length ? `<p>También: ${secondary.map(key => MUSCLE_GROUPS[key]).join(' · ')}</p>` : ''}
+    <p>${group === 'none' ? 'No hay un grupo muscular asignado a este ejercicio.' : group === 'cardio' ? 'Trabajo cardiovascular; no se destaca un músculo aislado.' : 'Zona de énfasis, no un mapa de activación medido. La variante y la técnica pueden cambiar los músculos implicados.'}</p>
+    <a class="btn btn-primary exercise-image-link" href="${esc(imageSearchUrl(movement.name))}" target="_blank" rel="noopener noreferrer">Google Imágenes <span aria-hidden="true">↗</span></a>
+  </div>`);
+}
+
 function edMovementHtml(bi, mi, m, count) {
   const p = `${bi}.${mi}`;
   const hasNote = !!(m.note && m.note.trim());
   return `
-    <article class="ed-mv" data-mv="${p}">
+    <article class="ed-mv" data-mv="${p}" data-movement-id="${esc(m.id)}">
       <div class="ed-mv-top">
         <span class="ed-mvnum">${mi + 1}</span>
-        <input class="ed-name" data-path="m.${p}.name" value="${esc(m.name)}" placeholder="Nombre del ejercicio" />
+        <input class="ed-name" data-path="m.${p}.name" value="${esc(m.name)}" placeholder="Nombre del ejercicio" aria-label="Nombre del ejercicio ${mi + 1}" />
       </div>
       <div class="ed-mv-row">
         <label class="ed-field ed-field-reps"><span>Reps</span>
           <input data-path="m.${p}.reps" value="${esc(m.reps)}" placeholder="10" />
         </label>
         <div class="ed-seg" data-kind="${p}">
-          <button data-k="weight" class="${m.kind === 'weight' ? 'on' : ''}">Peso</button>
-          <button data-k="check" class="${m.kind === 'check' ? 'on' : ''}">Check</button>
+          <button data-k="weight" aria-pressed="${m.kind === 'weight'}" class="${m.kind === 'weight' ? 'on' : ''}">Peso</button>
+          <button data-k="check" aria-pressed="${m.kind === 'check' && !m.timer}" class="${m.kind === 'check' && !m.timer ? 'on' : ''}">Check</button>
+          <button data-k="time" aria-pressed="${!!m.timer}" class="${m.timer ? 'on' : ''}">Tiempo</button>
         </div>
         <div class="ed-tools">
           <button class="ed-icon" data-move-mv="${p}" data-dir="-1" ${mi === 0 ? 'disabled' : ''} aria-label="Subir ejercicio">${ED_ICON.up}</button>
@@ -828,7 +1077,11 @@ function edMovementHtml(bi, mi, m, count) {
           <button class="ed-icon danger" data-del-mv="${p}" aria-label="Eliminar ejercicio">${ED_ICON.trash}</button>
         </div>
       </div>
+      <label class="ed-field ed-timing" ${m.timer ? '' : 'hidden'}><span>Duración · segundos</span>
+        <input data-path="m.${p}.timer" value="${m.timer || 20}" inputmode="numeric" aria-label="Duración del ejercicio en segundos" />
+      </label>
       <input class="ed-note ${hasNote ? '' : 'ed-hide'}" data-path="m.${p}.note" value="${esc(m.note || '')}" placeholder="Nota para este ejercicio" />
+      <label class="ed-field ed-muscle"><span>Grupo muscular</span><select data-path="m.${p}.muscleGroup" aria-label="Grupo muscular de ${esc(m.name)}"><option value="">Automático por nombre</option>${Object.entries(MUSCLE_GROUPS).map(([key, label]) => `<option value="${key}"${m.muscleGroup === key ? ' selected' : ''}>${label}</option>`).join('')}</select></label>
       <button class="ed-note-add ${hasNote ? 'ed-hide' : ''}" data-note="${p}">+ Nota</button>
     </article>`;
 }
@@ -863,6 +1116,7 @@ function renderEdDay() {
         <span class="ed-bnum">Bloque ${bi + 1}</span>
         <span class="ed-bmeta">${plural(b.movements.length, 'ejercicio', 'ejercicios')} · ${plural(b.sets, 'serie', 'series')}</span>
         <div class="ed-tools">
+          <button class="ed-icon" data-copy-block="${bi}" aria-label="Duplicar bloque" title="Duplicar bloque">${ED_ICON.copy}</button>
           <button class="ed-icon" data-move-block="${bi}" data-dir="-1" ${bi === 0 ? 'disabled' : ''} aria-label="Subir bloque">${ED_ICON.up}</button>
           <button class="ed-icon" data-move-block="${bi}" data-dir="1" ${bi === day.blocks.length - 1 ? 'disabled' : ''} aria-label="Bajar bloque">${ED_ICON.down}</button>
           <button class="ed-icon danger" data-del-block="${bi}" aria-label="Eliminar bloque">${ED_ICON.trash}</button>
@@ -957,9 +1211,9 @@ function bindEditor() {
     if (key === 'sets') {
       const n = parseInt(e.target.value, 10);
       obj.sets = Number.isFinite(n) ? Math.min(12, Math.max(1, n)) : 1;
-    } else if (key === 'rest') {
+    } else if (key === 'rest' || key === 'timer') {
       const n = parseInt(e.target.value, 10);
-      obj.rest = Number.isFinite(n) ? n : undefined;
+      obj[key] = Number.isFinite(n) ? Math.min(7200, Math.max(key === 'timer' ? 1 : 0, n)) : undefined;
     } else if (key === 'floor') {
       obj.floor = e.target.value.trim() || null;
     } else {
@@ -992,9 +1246,14 @@ function bindEditor() {
     if ((el = e.target.closest('.ed-seg button'))) {
       const p = el.parentElement.dataset.kind.split('.');
       const mv = day.blocks[+p[0]].movements[+p[1]];
-      if (mv.kind === el.dataset.k) return;
-      mv.kind = el.dataset.k;
-      el.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.k === mv.kind));
+      mv.kind = el.dataset.k === 'weight' ? 'weight' : 'check';
+      if (el.dataset.k === 'time') mv.timer = mv.timer || 20;
+      else delete mv.timer;
+      el.parentElement.querySelectorAll('button').forEach(b => {
+        b.classList.toggle('on', b === el);
+        b.setAttribute('aria-pressed', String(b === el));
+      });
+      el.closest('.ed-mv').querySelector('.ed-timing').hidden = el.dataset.k !== 'time';
       edTouch(); haptic();
       return;
     }
@@ -1012,6 +1271,16 @@ function bindEditor() {
       if (to < 0 || to >= list.length) return;
       list.splice(to, 0, list.splice(from, 1)[0]);
       edTouch(); haptic(); refreshEdDay();
+      return;
+    }
+    if ((el = hit('data-copy-block'))) {
+      const index = Number(el.dataset.copyBlock);
+      const copy = JSON.parse(JSON.stringify(day.blocks[index]));
+      copy.id = uid();
+      copy.movements.forEach(movement => { movement.id = uid(); });
+      day.blocks.splice(index + 1, 0, copy);
+      edTouch(); haptic(); refreshEdDay();
+      toast('Bloque duplicado');
       return;
     }
     if ((el = hit('data-move-block'))) {
@@ -1067,9 +1336,9 @@ function bindEditor() {
     const tab = e.target.closest('[data-day-tab]');
     if (tab) { haptic(); edGoToDay(+tab.dataset.dayTab); return; }
     if (e.target.closest('[data-add-day]')) {
-      const n = state.draft.length + 1;
+      const n = Math.max(state.draft.length, ...state.draft.map(day => Number(day.label.match(/\d+/)?.[0]) || 0)) + 1;
       state.draft.push({
-        id: `d${n}`, label: `Día ${n}`, title: '', subtitle: '',
+        id: uid(), label: `Día ${n}`, title: '', subtitle: '',
         accent: DAY_ACCENTS[(n - 1) % DAY_ACCENTS.length],
         blocks: [{ id: uid(), floor: null, sets: 3, movements: [newMovement()] }]
       });
@@ -1096,6 +1365,13 @@ function updateEdDayStats() {
 
 /** Marca los ejercicios sin nombre y salta al primero. Devuelve true si todo está bien. */
 function edValidate() {
+  const ids = new Set();
+  for (const day of state.draft) {
+    for (const item of [day, ...day.blocks, ...day.blocks.flatMap(block => block.movements)]) {
+      if (ids.has(item.id)) { toast('Hay elementos repetidos en la rutina. Revisa la importación.'); return false; }
+      ids.add(item.id);
+    }
+  }
   for (let di = 0; di < state.draft.length; di++) {
     for (const b of state.draft[di].blocks) {
       if (b.movements.some(m => !m.name.trim())) {
@@ -1117,11 +1393,11 @@ function edValidate() {
 
 /** Atributos que se muestran como barras, medidos contra tu propio histórico. */
 const ATTRS = [
-  { key: 'smm', label: 'Músculo', better: 'up' },
-  { key: 'pbf', label: 'Grasa corporal', better: 'down' },
-  { key: 'tbw', label: 'Agua', better: 'up' },
-  { key: 'protein', label: 'Proteína', better: 'up' },
-  { key: 'bmr', label: 'Metabolismo', better: 'up' }
+  { key: 'smm', label: 'Músculo · kg' },
+  { key: 'pbf', label: 'Grasa corporal' },
+  { key: 'tbw', label: 'Agua · L' },
+  { key: 'protein', label: 'Proteína · kg' },
+  { key: 'bmr', label: 'Metabolismo · kcal' }
 ];
 
 function renderBody() {
@@ -1142,6 +1418,15 @@ function renderBody() {
 
   const latest = list[list.length - 1];
   const prev = list[list.length - 2];
+  const score = latest.values.score;
+  const weeklySessions = state.sessions.filter(session => session.finishedAt && session.startedAt >= weekStart(Date.now())).length;
+  const weekProgress = Math.min(100, Math.round(weeklySessions / PROFILE.daysPerWeek * 100));
+  const scoreDelta = Number.isFinite(score) && Number.isFinite(prev?.values.score) ? score - prev.values.score : null;
+  const profileHtml = `<section class="player-status" aria-label="Estado físico y actividad">
+    <div class="player-heading"><div><span class="eyebrow">Perfil de entrenamiento</span><h2>${esc(PROFILE.name.split(' ')[0])}</h2><span class="player-sport">${esc(PROFILE.sport)}</span></div><div class="player-emblem" aria-label="Puntuación InBody ${Number.isFinite(score) ? score : 'sin datos'}"><span>INBODY</span><strong>${Number.isFinite(score) ? score : '—'}</strong><small>PUNTOS</small></div></div>
+    <div class="player-reading"><span>${fmtDate(latest.at, { day: 'numeric', month: 'short', year: 'numeric' })}</span><span>${scoreDelta === null ? 'Sin comparación anterior' : `${scoreDelta > 0 ? '+' : ''}${scoreDelta} puntos vs. anterior`}</span></div>
+    <div class="weekly-mission"><div><h3>Objetivo semanal</h3><strong>${weeklySessions}<span> / ${PROFILE.daysPerWeek} sesiones</span></strong></div><div class="mission-track" role="progressbar" aria-label="Objetivo semanal de sesiones" aria-valuemin="0" aria-valuemax="${PROFILE.daysPerWeek}" aria-valuenow="${Math.min(weeklySessions, PROFILE.daysPerWeek)}"><span style="width:${weekProgress}%"></span></div></div>
+  </section>`;
 
   const heroHtml = INBODY_FIELDS.filter(f => f.primary).map(f => {
     const v = latest.values[f.key];
@@ -1149,12 +1434,12 @@ function renderBody() {
     let delta = '<div class="md flat">—</div>';
     if (v !== undefined && p !== undefined) {
       const d = +(v - p).toFixed(1);
-      const cls = d === 0 ? 'flat' : (f.better === 'down' ? (d < 0 ? 'good' : 'bad') : (d > 0 ? 'good' : 'bad'));
-      delta = `<div class="md ${cls}">${d > 0 ? '↑' : d < 0 ? '↓' : ''} ${Math.abs(d).toFixed(1)}${f.percent ? '%' : ''}</div>`;
+      const cls = d === 0 || f.key === 'weight' ? 'flat' : (f.better === 'down' ? (d < 0 ? 'good' : 'bad') : (d > 0 ? 'good' : 'bad'));
+      delta = `<div class="md ${cls}">${d > 0 ? '↑' : d < 0 ? '↓' : ''} ${Math.abs(d).toFixed(1)}${f.percent ? ' pp' : ''}</div>`;
     }
     return `<div class="metric">
         <div class="mv">${esc(formatValue(f.key, v))}</div>
-        <div class="ml">${esc(f.label)}</div>
+        <div class="ml">${esc(f.label)}${f.key === 'weight' || f.key === 'smm' ? ' · kg' : ''}</div>
         ${delta}
       </div>`;
   }).join('');
@@ -1164,21 +1449,20 @@ function renderBody() {
     const v = latest.values[a.key];
     if (v === undefined || vals.length < 2) return '';
     const min = Math.min(...vals), max = Math.max(...vals);
-    const span = (max - min) || 1;
-    // La barra mide tu posición entre tu peor y tu mejor registro histórico.
-    const raw = (v - min) / span;
-    const pct = Math.round((a.better === 'down' ? 1 - raw : raw) * 100);
+    const span = max - min;
+    const raw = span ? (v - min) / span : 0.5;
+    const pct = Math.round(raw * 100);
     const p = prev?.values[a.key];
     const d = p !== undefined ? +(v - p).toFixed(1) : null;
-    const good = d === null || d === 0 ? 'flat' : (a.better === 'down' ? (d < 0 ? 'good' : 'bad') : (d > 0 ? 'good' : 'bad'));
-    const color = good === 'good' ? 'var(--green)' : good === 'bad' ? 'var(--orange)' : 'var(--brand)';
+    const color = a.key === 'smm' ? 'var(--green)' : a.key === 'pbf' ? 'var(--orange)' : 'var(--cyan)';
     return `<div class="attr">
         <div class="attr-head">
           <span class="an">${esc(a.label)}</span>
           <span class="av">${esc(formatValue(a.key, v))}</span>
-          ${d !== null ? `<span class="ad md ${good}">${d > 0 ? '+' : ''}${d}</span>` : ''}
+          ${d !== null ? `<span class="ad md flat">${d > 0 ? '+' : ''}${d}${a.key === 'pbf' ? ' pp' : ''}</span>` : ''}
         </div>
-        <div class="attr-track"><div class="attr-fill" style="width:${Math.max(4, pct)}%;background:${color}"></div></div>
+        <div class="attr-track" ${span ? `role="meter" aria-valuemin="${min}" aria-valuemax="${max}" aria-valuenow="${v}"` : 'role="img"'} aria-label="${esc(a.label)}: ${span ? 'posición en tu histórico' : 'sin variación'}"><div class="attr-fill" style="width:${pct}%;background:${color}"></div></div>
+        <div class="attr-range"><span>Mín. ${esc(formatValue(a.key, min))}</span><span>${span ? `Máx. ${esc(formatValue(a.key, max))}` : 'Sin variación'}</span></div>
       </div>`;
   }).join('');
 
@@ -1188,7 +1472,11 @@ function renderBody() {
   ).join('');
 
   slot.innerHTML = `
+    ${profileHtml}
+    <h2 class="section-title">Composición corporal</h2>
     <div class="metric-hero">${heroHtml}</div>
+
+    ${attrsHtml ? `<section class="attribute-panel"><h2 class="section-title">Atributos · Histórico personal</h2><div class="attrs">${attrsHtml}</div></section>` : ''}
 
     <h2 class="section-title">Evolución</h2>
     <div class="card chart-card">
@@ -1199,14 +1487,7 @@ function renderBody() {
       ${sparkline(state.chartMetric)}
     </div>
 
-    ${attrsHtml ? `<h2 class="section-title">Atributos</h2>
-    <div class="card attrs">
-      ${attrsHtml}
-      <p class="attr-note">La barra marca dónde estás hoy entre tu peor y tu mejor registro. El número de al lado es el cambio contra la medición anterior.</p>
-    </div>` : ''}
-
-    <h2 class="section-title">Última medición · ${fmtDate(latest.at, { day: 'numeric', month: 'long', year: 'numeric' })}</h2>
-    <div class="list-card">${rest || '<div class="measure-row"><span class="mr-body"><small>Sin datos adicionales</small></span></div>'}</div>
+    <details class="stats-details"><summary>Datos de la última medición <span>${fmtDate(latest.at, { day: 'numeric', month: 'short' })}</span></summary><div class="list-card">${rest || '<div class="measure-row"><span class="mr-body"><small>Sin datos adicionales</small></span></div>'}</div></details>
 
     <h2 class="section-title">Todas las mediciones</h2>
     <div class="list-card">${list.slice().reverse().map(m => `
@@ -1219,7 +1500,16 @@ function renderBody() {
       </button>`).join('')}</div>`;
 
   $$('.chip[data-metric]').forEach(c => {
-    c.onclick = () => { state.chartMetric = c.dataset.metric; renderBody(); };
+    c.onclick = () => {
+      state.chartMetric = c.dataset.metric;
+      $$('.chip[data-metric]').forEach(button => {
+        button.classList.toggle('on', button === c);
+        button.setAttribute('aria-pressed', String(button === c));
+      });
+      const chart = $('.chart-card .spark');
+      if (chart) chart.outerHTML = sparkline(state.chartMetric);
+      else renderBody();
+    };
   });
   $$('.measure-row[data-measure]').forEach(r => {
     r.onclick = () => openMeasureSheet(state.measures.find(m => m.id === r.dataset.measure));
@@ -1236,22 +1526,23 @@ function sparkline(key) {
       Necesitas al menos 2 mediciones para ver la tendencia.</p>`;
   }
 
-  const W = 300, H = 110, PAD_X = 16, PAD_TOP = 16, PAD_BOT = 24;
+  const W = 360, H = 150, PAD_X = 30, PAD_TOP = 24, PAD_BOT = 28;
   const ys = pts.map(p => p.y);
   const min = Math.min(...ys), max = Math.max(...ys);
   const span = (max - min) || 1;
-  const sx = i => PAD_X + (i / (pts.length - 1)) * (W - PAD_X * 2);
+  const timeSpan = pts.at(-1).x - pts[0].x || 1;
+  const sx = i => PAD_X + ((pts[i].x - pts[0].x) / timeSpan) * (W - PAD_X * 2);
   const sy = v => PAD_TOP + (1 - (v - min) / span) * (H - PAD_TOP - PAD_BOT);
 
   const line = pts.map((p, i) => `${i ? 'L' : 'M'}${sx(i).toFixed(1)},${sy(p.y).toFixed(1)}`).join(' ');
   const area = `${line} L${sx(pts.length - 1).toFixed(1)},${H - PAD_BOT} L${PAD_X},${H - PAD_BOT} Z`;
 
   const dots = pts.map((p, i) => `
-    <circle class="dot" cx="${sx(i).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="3"/>
-    <text class="val" x="${sx(i).toFixed(1)}" y="${(sy(p.y) - 8).toFixed(1)}" text-anchor="middle">${esc(formatValue(key, p.y))}</text>
-    <text class="lbl" x="${sx(i).toFixed(1)}" y="${H - 6}" text-anchor="middle">${new Date(p.x).toLocaleDateString('es-MX', { day: 'numeric', month: 'short' })}</text>`).join('');
+    <circle class="dot" cx="${sx(i).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="3"><title>${esc(fmtDate(p.x))}: ${esc(formatValue(key, p.y))}</title></circle>
+    ${pts.length <= 5 || i === 0 || i === pts.length - 1 ? `<text class="val" x="${sx(i).toFixed(1)}" y="${(sy(p.y) - 10).toFixed(1)}" text-anchor="middle">${esc(formatValue(key, p.y))}</text>
+    <text class="lbl" x="${sx(i).toFixed(1)}" y="${H - 6}" text-anchor="middle">${new Date(p.x).toLocaleDateString('es-MX', { day: 'numeric', month: 'short' })}</text>` : ''}`).join('');
 
-  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(fieldMeta(key).label)}: ${esc(formatValue(key, pts[0].y))} a ${esc(formatValue(key, pts.at(-1).y))}">
       <defs><linearGradient id="sparkgrad" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.28"/>
         <stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/>
@@ -1262,14 +1553,14 @@ function sparkline(key) {
     </svg>`;
 }
 
-function measureFieldsHtml(values, parsedKeys = [], fixedKeys = []) {
-  return `<div class="field-grid">${INBODY_FIELDS.map(f => {
+function measureFieldsHtml(values, parsedKeys = [], fixedKeys = [], fields = INBODY_FIELDS) {
+  return `<div class="field-grid">${fields.map(f => {
     const cls = fixedKeys.includes(f.key) ? ' fixed' : (parsedKeys.includes(f.key) ? ' parsed' : '');
     return `
     <div class="field${cls}">
       <label for="fld-${f.key}">${esc(f.label)}${f.percent ? ' (%)' : ''}${fixedKeys.includes(f.key) ? ' · corregido' : ''}</label>
       <input id="fld-${f.key}" data-field="${f.key}" inputmode="decimal" autocomplete="off"
-             value="${values[f.key] ?? ''}" placeholder="—" />
+             value="${esc(values[f.key] ?? '')}" placeholder="—" />
     </div>`;
   }).join('')}</div>`;
 }
@@ -1318,16 +1609,16 @@ function openMeasureForm(measure, parsedKeys, fixedKeys = []) {
   openSheet(`
     <div class="grabber"></div>
     <h2>${measure.id ? 'Editar medición' : 'Revisa los datos'}</h2>
-    <p>Verde = detectado en el texto. Naranja = lo corregí porque no cuadraba con el resto.</p>
+    ${parsedKeys.length ? `<p>${parsedKeys.length} datos detectados${fixedKeys.length ? ` · ${fixedKeys.length} por revisar` : ''}</p>` : ''}
     <div id="checks-slot">${checksHtml(measure.values)}</div>
     <div class="field" style="margin-bottom:14px">
       <label for="fld-date">Fecha de la prueba</label>
       <input id="fld-date" type="date" value="${dateStr}" style="font-size:17px" />
     </div>
-    ${measureFieldsHtml(measure.values, parsedKeys, fixedKeys)}
-    <button class="btn btn-primary" id="btn-save-measure">Guardar medición</button>
-    ${measure.id ? '<button class="btn btn-danger" id="btn-del-measure">Eliminar</button>' : ''}
-    <button class="btn btn-ghost" id="btn-cancel-measure">Cancelar</button>
+    ${measureFieldsHtml(measure.values, parsedKeys, fixedKeys, INBODY_FIELDS.filter(field => field.primary))}
+    <details class="measure-details" ${fixedKeys.some(key => !fieldMeta(key).primary) ? 'open' : ''}><summary>Datos adicionales</summary>${measureFieldsHtml(measure.values, parsedKeys, fixedKeys, INBODY_FIELDS.filter(field => !field.primary))}</details>
+    <div class="sheet-form-actions"><button class="btn btn-primary" id="btn-save-measure">Guardar medición</button><button class="btn btn-ghost" id="btn-cancel-measure">Cancelar</button></div>
+    ${measure.id ? '<button class="session-delete" id="btn-del-measure">Eliminar medición</button>' : ''}
   `);
 
   const readValues = () => {
@@ -1335,26 +1626,47 @@ function openMeasureForm(measure, parsedKeys, fixedKeys = []) {
     $$('#sheet input[data-field]').forEach(inp => {
       const raw = inp.value.replace(',', '.').trim();
       if (raw === '') return;
-      const n = parseFloat(raw);
+      const n = Number(raw);
       if (Number.isFinite(n)) values[inp.dataset.field] = n;
     });
     return values;
   };
 
   $$('#sheet input[data-field]').forEach(inp => {
-    inp.addEventListener('input', () => { $('#checks-slot').innerHTML = checksHtml(readValues()); });
+    inp.addEventListener('input', () => { inp.removeAttribute('aria-invalid'); $('#checks-slot').innerHTML = checksHtml(readValues()); });
   });
 
   $('#btn-cancel-measure').onclick = closeSheet;
 
+  let savingMeasure = false;
   $('#btn-save-measure').onclick = async () => {
+    if (savingMeasure) return;
+    const invalid = $$('#sheet input[data-field]').find(input => {
+      const raw = input.value.replace(',', '.').trim();
+      const meta = fieldMeta(input.dataset.field);
+      const value = Number(raw);
+      return raw && (!/^-?(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw) || !Number.isFinite(value) || (meta.range && (value < meta.range[0] || value > meta.range[1])));
+    });
+    if (invalid) {
+      const details = invalid.closest('details');
+      if (details) details.open = true;
+      invalid.setAttribute('aria-invalid', 'true');
+      invalid.focus();
+      toast(`Revisa ${fieldMeta(invalid.dataset.field).label.toLowerCase()}`);
+      return;
+    }
     const values = readValues();
     if (!Object.keys(values).length) return toast('Captura al menos un dato');
 
     const d = $('#fld-date').value;
+    if (!d || !Number.isFinite(new Date(`${d}T12:00:00`).getTime())) { $('#fld-date').focus(); return toast('Selecciona una fecha válida'); }
     const at = d ? new Date(`${d}T12:00:00`).getTime() : measure.at;
     const sameDay = state.measures.find(m => m.id !== measure.id &&
       new Date(m.at).toDateString() === new Date(at).toDateString());
+    const saveButton = $('#btn-save-measure');
+    savingMeasure = true;
+    saveButton.disabled = true;
+    try {
     if (sameDay) {
       const ok = await confirmSheet({
         title: 'Ya hay una medición ese día',
@@ -1362,44 +1674,67 @@ function openMeasureForm(measure, parsedKeys, fixedKeys = []) {
         confirm: 'Reemplazar', cancel: 'Cancelar'
       });
       if (!ok) return;
-      await db.deleteMeasure(sameDay.id);
-      state.measures = state.measures.filter(m => m.id !== sameDay.id);
     }
 
-    const rec = { id: measure.id || uid(), at, values };
+    const rec = { id: sameDay?.id || measure.id || uid(), at, values };
     await db.putMeasure(rec);
-    state.measures = state.measures.filter(m => m.id !== rec.id).concat(rec).sort((a, b) => a.at - b.at);
+    if (sameDay && measure.id && measure.id !== sameDay.id) await db.deleteMeasure(measure.id);
+    state.measures = state.measures.filter(m => m.id !== rec.id && m.id !== measure.id).concat(rec).sort((a, b) => a.at - b.at);
     closeSheet();
     renderBody();
     toast('Medición guardada');
     sync.syncQuietly();
+    } catch {
+      toast('No se pudo guardar la medición. Revisa el almacenamiento.');
+    } finally {
+      savingMeasure = false;
+      saveButton.disabled = false;
+    }
   };
 
   if (measure.id) {
     $('#btn-del-measure').onclick = async () => {
+      const accepted = await confirmSheet({ title: 'Eliminar medición', body: 'Se eliminará este InBody. El cambio también se enviará a tus dispositivos al sincronizar.', confirm: 'Eliminar', cancel: 'Conservar', danger: true });
+      if (!accepted) return;
       await db.deleteMeasure(measure.id);
       state.measures = state.measures.filter(m => m.id !== measure.id);
       closeSheet();
       renderBody();
-      toast('Medición eliminada');
+      toast('Medición eliminada', { label: 'Deshacer', fn: async () => {
+        const restored = { ...measure };
+        delete restored.deletedAt;
+        await db.putMeasure(restored);
+        state.measures.push(restored);
+        state.measures.sort((first, second) => first.at - second.at);
+        renderBody();
+      } });
     };
   }
 }
 
 function openMeasureSheet(measure) {
   if (!measure) return;
-  openMeasureForm(measure, []);
+  const units = { weight: 'kg', smm: 'kg', bfm: 'kg', ffm: 'kg', tbw: 'L', protein: 'kg', minerals: 'kg', bmr: 'kcal', intake: 'kcal', idealWeight: 'kg', weightCtrl: 'kg', fatCtrl: 'kg', muscleCtrl: 'kg', height: 'cm' };
+  openSheet(`<h2>Medición InBody</h2><p>${fmtDate(measure.at, { day: 'numeric', month: 'long', year: 'numeric' })}</p>
+    <dl class="measurement-summary">${INBODY_FIELDS.filter(field => measure.values[field.key] !== undefined).map(field => `<div><dt>${esc(field.label)}</dt><dd>${esc(formatValue(field.key, measure.values[field.key]))}${units[field.key] ? ` <small>${units[field.key]}</small>` : ''}</dd></div>`).join('')}</dl>
+    <div class="sheet-form-actions"><button class="btn btn-primary" id="measure-edit">Editar medición</button><button class="btn btn-ghost" id="measure-close">Cerrar</button></div>`);
+  $('#measure-edit').onclick = () => openMeasureForm(measure, []);
+  $('#measure-close').onclick = closeSheet;
 }
 
 /* ---------- Terminar sesión ---------- */
 
 async function finishWorkout() {
+  if (!state.session || state.session.finishedAt) return;
   const s = state.session;
-  const day = dayById(s.dayId);
+  const day = sessionDay(s);
   const p = sessionProgress(s);
   s.finishedAt = Date.now();
   await saveSession(true);
   state.session = null;
+  setView('home');
+  renderHome();
+  renderHistory();
 
   openSheet(`
     <div class="grabber"></div>
@@ -1419,28 +1754,55 @@ async function finishWorkout() {
 /* ---------- Hojas modales ---------- */
 
 let sheetToken = 0;
+let sheetDismiss = null;
+let sheetFocus = null;
 
 function openSheet(html) {
   sheetToken++;
+  if (!$('#sheet-backdrop').classList.contains('show')) sheetFocus = document.activeElement;
   $('#sheet').innerHTML = html;
+  $('#sheet .grabber')?.remove();
+  const toolbar = document.createElement('div');
+  toolbar.className = 'sheet-toolbar';
+  toolbar.innerHTML = '<span class="grabber" aria-hidden="true"></span><button class="icon-btn sheet-dismiss" aria-label="Cerrar ventana" title="Cerrar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 6 12 12M6 18 18 6"/></svg></button>';
+  $('#sheet').prepend(toolbar);
+  toolbar.querySelector('button').onclick = () => closeSheet();
+  $('#sheet').scrollTop = 0;
+  const heading = $('#sheet h2');
+  if (heading) heading.id = 'sheet-title';
   const backdrop = $('#sheet-backdrop');
   backdrop.inert = false;
   backdrop.classList.add('show');
+  $('#app').inert = true;
+  $('#tabbar').inert = true;
+  $('#rest-timer').inert = true;
+  document.body.classList.add('sheet-open');
+  $('#sheet').focus({ preventScroll: true });
 }
 
-function closeSheet() {
+function closeSheet(accepted = false) {
   const backdrop = $('#sheet-backdrop');
   if (!backdrop.classList.contains('show')) return;
   // Soltar el foco antes de ocultar: si no, queda atrapado en contenido invisible.
   if (backdrop.contains(document.activeElement)) document.activeElement.blur();
   backdrop.classList.remove('show');
   backdrop.inert = true;
+  $('#app').inert = false;
+  $('#tabbar').inert = false;
+  $('#rest-timer').inert = !$('#rest-timer').classList.contains('show');
+  document.body.classList.remove('sheet-open');
+  if (sheetFocus?.isConnected) sheetFocus.focus({ preventScroll: true });
   // Se vacía al terminar la animación: si no, los botones siguen en el DOM fuera de pantalla.
   const token = ++sheetToken;
-  setTimeout(() => { if (token === sheetToken) $('#sheet').innerHTML = ''; }, 450);
+  setTimeout(() => { if (token === sheetToken) $('#sheet').innerHTML = ''; }, 260);
+  const dismiss = sheetDismiss;
+  sheetDismiss = null;
+  dismiss?.(accepted === true);
 }
 
 function confirmSheet({ title, body, confirm, cancel, danger }) {
+  const previous = $('#sheet-backdrop').classList.contains('show') ? [...$('#sheet').childNodes] : null;
+  const previousScroll = $('#sheet').scrollTop;
   return new Promise(resolve => {
     openSheet(`
       <div class="grabber"></div>
@@ -1449,8 +1811,16 @@ function confirmSheet({ title, body, confirm, cancel, danger }) {
       <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" id="cf-yes">${esc(confirm)}</button>
       <button class="btn btn-ghost" id="cf-no">${esc(cancel)}</button>
     `);
-    $('#cf-yes').onclick = () => { closeSheet(); resolve(true); };
-    $('#cf-no').onclick = () => { closeSheet(); resolve(false); };
+    sheetDismiss = accepted => {
+      if (!accepted && previous) {
+        openSheet('');
+        $('#sheet').replaceChildren(...previous);
+        $('#sheet').scrollTop = previousScroll;
+      }
+      resolve(accepted);
+    };
+    $('#cf-yes').onclick = () => closeSheet(true);
+    $('#cf-no').onclick = () => closeSheet();
   });
 }
 
@@ -1580,11 +1950,11 @@ async function renderSync() {
   }
 
   slot.innerHTML = `<div class="list-card">
-    <button class="list-row" id="btn-sync-now">
+    <button class="list-row" id="btn-sync-now" ${st.syncing ? 'disabled' : ''}>
       <div class="lr-icon" style="background:color-mix(in srgb, #30D158 22%, transparent);color:#30D158">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 01-9 9 9 9 0 01-7.6-4.2M3 12a9 9 0 019-9 9 9 0 017.6 4.2"/><path d="M21 3v5h-5M3 21v-5h5"/></svg>
       </div>
-      <div class="lr-body"><strong>Sincronizar ahora</strong><small>${last ? `Última vez: ${fmtDate(last, { day: 'numeric', month: 'short' })} ${new Date(last).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}` : 'Nunca'}</small></div>
+      <div class="lr-body"><strong>${st.syncing ? 'Sincronizando…' : 'Sincronizar ahora'}</strong><small>${last ? `Última vez: ${fmtDate(last, { day: 'numeric', month: 'short' })} ${new Date(last).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}` : 'Pendiente de primera sincronización'}</small></div>
       <svg class="chev" width="8" height="14" viewBox="0 0 8 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 1l6 6-6 6"/></svg>
     </button>
     <div class="list-row">
@@ -1595,6 +1965,7 @@ async function renderSync() {
     </button>
   </div>`;
 
+  if (st.error) slot.insertAdjacentHTML('beforeend', `<div class="notice warn" role="status">${esc(st.error)}. Los datos locales se conservan.</div>`);
   $('#btn-sync-now').onclick = async () => {
     toast('Sincronizando…');
     try {
@@ -1621,11 +1992,11 @@ function openSyncSetup() {
     <p>En tu proyecto: <b>Project Settings → Data API</b> para la URL, y <b>API Keys</b> para la clave. Antes corre el archivo <b>sql/schema.sql</b> en el SQL Editor.</p>
     <div class="field" style="margin-bottom:10px">
       <label for="sb-url">Project URL</label>
-      <input id="sb-url" placeholder="https://xxxxx.supabase.co" autocapitalize="off" autocorrect="off" spellcheck="false" style="font-size:15px" />
+      <input id="sb-url" placeholder="https://xxxxx.supabase.co" autocapitalize="off" autocorrect="off" spellcheck="false" style="font-size:16px" />
     </div>
     <div class="field" style="margin-bottom:16px">
       <label for="sb-key">Publishable key</label>
-      <input id="sb-key" placeholder="sb_publishable_…" autocapitalize="off" autocorrect="off" spellcheck="false" style="font-size:15px" />
+      <input id="sb-key" placeholder="sb_publishable_…" autocapitalize="off" autocorrect="off" spellcheck="false" style="font-size:16px" />
     </div>
     <button class="btn btn-primary" id="sb-save">Guardar</button>
     <button class="btn btn-ghost" id="sb-cancel">Cancelar</button>
@@ -1700,6 +2071,7 @@ async function forgetSync() {
 /* ---------- Ajustes ---------- */
 
 async function renderSettings() {
+  $('#settings-profile').innerHTML = `<div class="settings-monogram" aria-hidden="true">${esc(PROFILE.name.split(' ').map(part => part[0]).slice(0, 2).join(''))}</div><div><h2>${esc(PROFILE.name)}</h2><p>${esc(PROFILE.sport)} · Coach ${esc(PROFILE.coach)}</p></div><strong>${state.routine.length}<small>días</small></strong>`;
   const notice = $('#storage-notice');
   const standalone = isStandalone();
   const { persisted } = await requestPersistence();
@@ -1707,7 +2079,7 @@ async function renderSettings() {
   if (!standalone) {
     notice.innerHTML = `<div class="notice warn">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5M12 17.5v.5"/><circle cx="12" cy="12" r="9"/></svg>
-      <div><b>Instálala en la pantalla de inicio.</b> En Safari toca Compartir → «Añadir a pantalla de inicio». Así iOS deja de borrar los datos tras 7 días sin abrirla.</div>
+      <div><b>Disponible para instalar.</b> Conserva un respaldo de tus registros aunque uses la app instalada.</div>
     </div>`;
   } else {
     notice.innerHTML = `<div class="notice ok">
@@ -1733,7 +2105,7 @@ async function renderSettings() {
     .toLocaleDateString('es-MX', { day: 'numeric', month: 'long', year: 'numeric' });
 
   const mv = state.routine.reduce((a, d) => a + d.blocks.reduce((b, bl) => b + bl.movements.length, 0), 0);
-  $('#routine-summary').textContent = `${state.routine.length} días · ${mv} ejercicios`;
+  $('#routine-summary').textContent = `${state.routine.length} días · ${mv} ejercicios${state.routineUpdatedAt ? ` · Guardada ${fmtDate(state.routineUpdatedAt, { day: 'numeric', month: 'short' })}` : ' · Rutina inicial'}`;
 
   applyTheme(state.theme);
   await renderSync();
@@ -1766,6 +2138,20 @@ async function seedMeasures() {
 }
 
 function bindGlobal() {
+  if (window.visualViewport) {
+    const resizeSheet = () => {
+      const viewport = window.visualViewport;
+      const inset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+      document.documentElement.style.setProperty('--keyboard-inset', `${inset}px`);
+    };
+    window.visualViewport.addEventListener('resize', resizeSheet);
+    window.visualViewport.addEventListener('scroll', resizeSheet);
+    resizeSheet();
+  }
+  $('#app-version').textContent = `REAWAKEN · ${APP_VERSION}`;
+  $('#btn-check-update').onclick = checkForUpdate;
+  sync.onSyncChange(() => { if (state.view === 'settings') renderSync(); });
+  window.addEventListener('online', () => { if (!state.session && !state.draft) sync.syncQuietly(); });
   $$('.tab').forEach(t => {
     t.onclick = () => {
       const v = t.dataset.view;
@@ -1774,15 +2160,17 @@ function bindGlobal() {
       if (v === 'body') renderBody();
       if (v === 'history') renderHistory();
       if (v === 'settings') renderSettings();
+      window.scrollTo({ top: state.viewScroll[v] || 0 });
     };
   });
 
   $('#btn-back').onclick = () => { setView('home'); renderHome(); };
 
-  $('#btn-timer').onclick = () => startRest(state.rest.total || 45);
+  $('#btn-timer').onclick = () => startRest(state.restSeconds);
   $('#btn-notes').onclick = openNotes;
   $('#rt-close').onclick = hideRest;
-  $$('.rt-chip[data-rest]').forEach(b => { b.onclick = () => startRest(+b.dataset.rest); });
+  $('#rt-toggle').onclick = toggleCountdown;
+  $$('.rt-chip[data-rest]').forEach(b => { b.onclick = () => { state.restSeconds = +b.dataset.rest; startRest(state.restSeconds); }; });
   $('#btn-finish').onclick = async () => {
     const p = sessionProgress(state.session);
     if (p.done === 0) return toast('Aún no registras ninguna serie');
@@ -1863,7 +2251,7 @@ function bindGlobal() {
   $('#btn-wipe').onclick = async () => {
     const ok = await confirmSheet({
       title: 'Borrar todo',
-      body: 'Se eliminarán todas tus sesiones y mediciones de este dispositivo. Exporta un respaldo antes si no quieres perderlas.',
+      body: 'Se eliminarán tus sesiones y mediciones. Si usas sincronización, el borrado se enviará también a tus otros dispositivos. Exporta un respaldo antes de continuar.',
       confirm: 'Sí, borrar todo', cancel: 'Cancelar', danger: true
     });
     if (!ok) return;
@@ -1881,10 +2269,24 @@ function bindGlobal() {
   });
 
   $('#sheet-backdrop').onclick = (e) => { if (e.target.id === 'sheet-backdrop') closeSheet(); };
+  document.addEventListener('keydown', event => {
+    if (!$('#sheet-backdrop').classList.contains('show')) return;
+    if (event.key === 'Escape') { event.preventDefault(); closeSheet(); }
+    if (event.key !== 'Tab') return;
+    const controls = $$('#sheet button, #sheet input, #sheet textarea, #sheet select, #sheet a[href]').filter(el => !el.disabled && el.getClientRects().length);
+    const first = controls[0], last = controls.at(-1);
+    if (!first) { event.preventDefault(); return; }
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === $('#sheet'))) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === $('#sheet'))) {
+      event.preventDefault(); first.focus();
+    }
+  });
 
   // Guardado defensivo al salir de la app (iOS puede matarla en segundo plano)
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') saveSession(true);
+    else tickCountdown();
   });
   window.addEventListener('pagehide', () => saveSession(true));
 
@@ -1902,14 +2304,43 @@ async function init() {
   checkBackupReminder();
 
   sync.loadConfig().then(() => sync.syncQuietly().then(async r => {
-    if (!r || (!r.pulled && !r.pushed)) return;
+    if (!r || (!r.pulled && !r.pushed) || state.session || state.draft) return;
     await loadAll();
     await loadRoutine();
     renderHome();
   }));
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
+  }
+}
+
+async function checkForUpdate() {
+  const button = $('#btn-check-update');
+  const label = $('#update-status');
+  button.disabled = true;
+  label.textContent = 'Comprobando versión…';
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    if (!navigator.onLine) throw new Error('Sin conexión. Tus datos siguen guardados aquí.');
+    const response = await fetch(`index.html?update=${Date.now()}`, { cache: 'no-store', signal: controller.signal });
+    if (!response.ok) throw new Error('No se pudo consultar la actualización');
+    const remote = new DOMParser().parseFromString(await response.text(), 'text/html').documentElement.dataset.build;
+    const registration = await navigator.serviceWorker?.getRegistration();
+    await registration?.update();
+    label.textContent = remote === APP_VERSION ? `Versión ${APP_VERSION} instalada` : `Versión ${remote || 'nueva'} disponible`;
+    const accepted = await confirmSheet({
+      title: remote === APP_VERSION ? 'Recargar la app' : 'Actualizar REAWAKEN',
+      body: 'Se recargarán los archivos de la app. Tu rutina, tus registros y tu sesión de cuenta se conservan.',
+      confirm: 'Recargar', cancel: 'Ahora no'
+    });
+    if (accepted) { await saveSession(true); window.location.reload(); }
+  } catch (error) {
+    label.textContent = error.name === 'AbortError' ? 'La conexión tardó demasiado. Vuelve a intentar.' : error.message;
+  } finally {
+    clearTimeout(timeout);
+    button.disabled = false;
   }
 }
 

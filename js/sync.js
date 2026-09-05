@@ -18,6 +18,8 @@ const state = {
 };
 
 const listeners = new Set();
+let pendingSync = null;
+let lastError = null;
 export const onSyncChange = (fn) => { listeners.add(fn); return () => listeners.delete(fn); };
 const emit = () => listeners.forEach(fn => fn(status()));
 
@@ -26,7 +28,9 @@ export function status() {
     configured: Boolean(state.url && state.anonKey),
     signedIn: Boolean(state.session?.access_token),
     email: state.session?.user?.email || null,
-    online: navigator.onLine
+    online: navigator.onLine,
+    syncing: Boolean(pendingSync),
+    error: lastError
   };
 }
 
@@ -147,7 +151,7 @@ const toRemote = {
   sessions: (s, uid) => ({
     id: s.id, user_id: uid, day_id: s.dayId,
     started_at: s.startedAt, finished_at: s.finishedAt ?? null,
-    entries: s.entries, notes: s.notes ?? null,
+    entries: { ...s.entries, ...(s.routineSnapshot ? { _routineSnapshot: s.routineSnapshot } : {}) }, notes: s.notes ?? null,
     deleted_at: s.deletedAt ?? null, updated_at: s.updatedAt || s.startedAt
   }),
   measures: (m, uid) => ({
@@ -164,7 +168,8 @@ const toLocal = {
   sessions: (r) => ({
     id: r.id, dayId: r.day_id, startedAt: Number(r.started_at),
     finishedAt: r.finished_at === null ? null : Number(r.finished_at),
-    entries: r.entries || {}, notes: r.notes || '',
+    entries: Object.fromEntries(Object.entries(r.entries || {}).filter(([key]) => key !== '_routineSnapshot')),
+    routineSnapshot: r.entries?._routineSnapshot || undefined, notes: r.notes || '',
     deletedAt: r.deleted_at ? Number(r.deleted_at) : undefined,
     updatedAt: Number(r.updated_at)
   }),
@@ -217,7 +222,7 @@ async function syncTable(table, uid) {
   return { pulled, pushed: toPush.length };
 }
 
-export async function syncAll() {
+async function performSync() {
   if (!status().configured) throw new Error('Configura Supabase primero');
   if (!status().signedIn) throw new Error('Inicia sesión primero');
   if (!navigator.onLine) throw new Error('Sin conexión');
@@ -232,6 +237,20 @@ export async function syncAll() {
   await db.setMeta('lastSync', Date.now());
   emit();
   return result;
+}
+
+export function syncAll() {
+  if (pendingSync) return pendingSync;
+  lastError = null;
+  pendingSync = performSync().catch(error => {
+    lastError = error.message;
+    throw error;
+  }).finally(() => {
+    pendingSync = null;
+    emit();
+  });
+  emit();
+  return pendingSync;
 }
 
 /** Sincroniza sin ruido: los errores no deben interrumpir un entrenamiento. */

@@ -1,9 +1,11 @@
-const CACHE = 'reawaken-v7';
+const CACHE = 'reawaken-v12';
 const ASSETS = [
   './',
   './index.html',
   './css/styles.css',
+  './fonts/BarlowSemiCondensed-Bold.ttf',
   './js/app.js',
+  './js/exercise-info.js',
   './js/db.js',
   './js/routine.js',
   './js/routine-parser.js',
@@ -20,7 +22,7 @@ const ASSETS = [
 self.addEventListener('install', (e) => {
   e.waitUntil(
     caches.open(CACHE)
-      .then(c => c.addAll(ASSETS))
+      .then(c => c.addAll(ASSETS.map(asset => new Request(asset, { cache: 'reload' }))))
       .then(() => self.skipWaiting())
   );
 });
@@ -28,7 +30,7 @@ self.addEventListener('install', (e) => {
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(keys => Promise.all(keys.filter(k => k.startsWith('reawaken-') && k !== CACHE).map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
@@ -36,15 +38,25 @@ self.addEventListener('activate', (e) => {
 // Network-first con fallback a caché: siempre usable sin señal en el gym.
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
-  // Las llamadas a Supabase nunca se cachean.
-  if (!e.request.url.startsWith(self.location.origin)) return;
-  e.respondWith(
-    fetch(e.request)
-      .then(res => {
-        const copy = res.clone();
-        caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
-        return res;
-      })
-      .catch(() => caches.match(e.request).then(r => r || caches.match('./index.html')))
-  );
+  const url = new URL(e.request.url);
+  if (url.origin !== self.location.origin) return;
+  const navigation = e.request.mode === 'navigate';
+  if (!navigation && !ASSETS.some(asset => new URL(asset, self.location.href).pathname === url.pathname)) return;
+  url.search = '';
+  const key = navigation ? new URL('./index.html', self.location.href).href : url.href;
+  e.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    const cached = await cache.match(key);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), cached ? 4000 : 15000);
+    try {
+      const response = await fetch(e.request, { cache: 'no-cache', signal: controller.signal });
+      if (response.ok) await cache.put(key, response.clone()).catch(() => {});
+      return response;
+    } catch {
+      return cached || Response.error();
+    } finally {
+      clearTimeout(timeout);
+    }
+  })());
 });

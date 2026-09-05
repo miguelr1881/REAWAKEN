@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="es" data-build="2.3.0">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
-<meta name="theme-color" content="#000000" id="meta-theme-color" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0c0d0f" id="meta-theme-color" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" id="meta-status-bar" />
@@ -19,7 +19,7 @@
         (pref === 'auto' && window.matchMedia('(prefers-color-scheme: light)').matches);
       document.documentElement.dataset.theme = light ? 'light' : 'dark';
       if (light) {
-        document.querySelector('#meta-theme-color').content = '#f2f2f7';
+        document.querySelector('#meta-theme-color').content = '#f5f6f8';
         document.querySelector('#meta-status-bar').content = 'default';
       }
     } catch (e) { /* modo privado */ }
@@ -28,7 +28,8 @@
 <link rel="manifest" href="manifest.webmanifest" />
 <link rel="apple-touch-icon" href="icons/icon-180.png" />
 <link rel="icon" href="icons/icon-192.png" />
-<link rel="stylesheet" href="css/styles.css" />
+<link rel="preload" href="fonts/BarlowSemiCondensed-Bold.ttf" as="font" type="font/ttf" crossorigin />
+<link rel="stylesheet" href="css/styles.css?v=2.3.0" />
 </head>
 <body>
 
@@ -40,24 +41,27 @@
   <section class="view active" id="view-home">
     <div class="page">
       <div class="hero">
+        <div class="brand-line"><img src="icons/icon-192.png" width="28" height="28" alt="" /><span>REAWAKEN</span></div>
         <p class="greet" id="greeting">Hola, Miguel</p>
-        <h1 class="title-xl">Entrenamiento</h1>
+        <h1 class="title-xl">Tu entrenamiento</h1>
         <p class="date" id="today-date"></p>
         <div class="stats-row">
           <div class="stat"><b id="stat-week">0</b><span>Esta semana</span></div>
           <div class="stat"><b id="stat-total">0</b><span>Sesiones</span></div>
           <div class="stat"><b id="stat-streak">0</b><span>Racha semanal</span></div>
         </div>
+        <div class="week-strip" id="week-strip" aria-label="Entrenamientos de esta semana"></div>
       </div>
 
       <div id="resume-slot"></div>
+      <div id="next-slot"></div>
       <div id="routine-alert"></div>
 
-      <h2 class="section-title">Tu rutina · 5 días</h2>
+      <h2 class="section-title" id="routine-heading">Tu rutina</h2>
       <div class="day-list" id="day-list"></div>
 
       <h2 class="section-title">Nota del entrenador</h2>
-      <div class="card" style="padding:15px 16px">
+      <div class="coach-note">
         <p style="font-size:13.5px;line-height:1.55;color:var(--text-2)">
           Cada semana subir pesos y al cardio aumentar 3 min.<br />
           <span style="color:var(--text-3)">Deporte principal: fútbol · Coach: Anderson</span>
@@ -98,7 +102,7 @@
   <!-- ============ STATS / INBODY ============ -->
   <section class="view" id="view-body">
     <div class="page">
-      <h1 class="title-xl">Stats</h1>
+      <header class="section-masthead"><div><span class="eyebrow">REAWAKEN</span><h1 class="title-xl">Stats</h1></div><span class="section-index" aria-hidden="true">02</span></header>
       <p class="date" id="body-sub">—</p>
       <div style="margin-top:20px" id="body-slot"></div>
       <button class="btn btn-ghost" id="btn-add-measure" style="margin-top:18px">+ Nueva medición InBody</button>
@@ -108,7 +112,7 @@
   <!-- ============ HISTORIAL ============ -->
   <section class="view" id="view-history">
     <div class="page">
-      <h1 class="title-xl">Historial</h1>
+      <header class="section-masthead"><div><span class="eyebrow">REAWAKEN</span><h1 class="title-xl">Historial</h1></div><span class="section-index" aria-hidden="true">03</span></header>
       <p class="date" id="history-sub">—</p>
       <div style="margin-top:20px" id="history-slot"></div>
     </div>
@@ -137,7 +141,8 @@
   <!-- ============ AJUSTES ============ -->
   <section class="view" id="view-settings">
     <div class="page">
-      <h1 class="title-xl">Ajustes</h1>
+      <header class="section-masthead"><div><span class="eyebrow">REAWAKEN</span><h1 class="title-xl">Ajustes</h1></div><span class="section-index" aria-hidden="true">04</span></header>
+      <div class="settings-profile" id="settings-profile"></div>
       <div style="margin-top:20px" id="storage-notice"></div>
 
       <h2 class="section-title">Apariencia</h2>
@@ -208,24 +213,23 @@
           <div class="lr-icon" style="background:color-mix(in srgb, #FF453A 20%, transparent);color:#FF453A">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
           </div>
-          <div class="lr-body"><strong style="color:#FF453A">Borrar todo</strong><small>Elimina todas las sesiones del dispositivo</small></div>
+          <div class="lr-body"><strong style="color:#FF453A">Borrar todo</strong><small>Elimina sesiones y mediciones, también al sincronizar</small></div>
         </button>
       </div>
 
       <h2 class="section-title">Plan</h2>
       <div class="list-card">
-        <div class="list-row"><div class="lr-body"><strong>Miguel J Tung</strong><small>Coach Anderson · 5 días por semana</small></div></div>
         <div class="list-row"><div class="lr-body"><strong>Cambio de rutina</strong><small id="routine-change">20 de octubre de 2026</small></div></div>
       </div>
 
-      <p style="text-align:center;color:var(--text-3);font-size:12px;margin-top:26px">REAWAKEN · v1.1</p>
+      <div class="app-build"><span id="app-version">REAWAKEN · 2.3.0</span><button id="btn-check-update" class="btn btn-ghost">Buscar actualización</button><small id="update-status" role="status"></small></div>
     </div>
   </section>
 
 </div>
 
 <!-- Temporizador de descanso -->
-<div class="rest-timer" id="rest-timer">
+<div class="rest-timer" id="rest-timer" inert>
   <div class="rt-ring">
     <svg width="46" height="46" viewBox="0 0 46 46">
       <circle cx="23" cy="23" r="19" fill="none" stroke="rgba(255,255,255,0.14)" stroke-width="4"/>
@@ -235,19 +239,25 @@
   </div>
   <div class="rt-info"><strong id="rt-title">Descanso</strong><small id="rt-label">Toca para ajustar</small></div>
   <div class="rt-actions">
-    <button class="rt-chip" data-rest="45">45s</button>
-    <button class="rt-chip" data-rest="60">60s</button>
-    <button class="rt-chip" data-rest="90">90s</button>
-    <button class="rt-chip" id="rt-close">✕</button>
+    <div id="rt-presets">
+      <button class="rt-chip" data-rest="45">45s</button>
+      <button class="rt-chip" data-rest="60">60s</button>
+      <button class="rt-chip" data-rest="90">90s</button>
+    </div>
+    <button class="rt-chip" id="rt-toggle" aria-label="Pausar temporizador" title="Pausar">
+      <svg class="pause-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+      <svg class="play-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4v16l13-8z"/></svg>
+    </button>
+    <button class="rt-chip" id="rt-close" aria-label="Cancelar temporizador" title="Cancelar">✕</button>
   </div>
 </div>
 
 <!-- Hoja modal -->
 <div class="sheet-backdrop" id="sheet-backdrop" inert>
-  <div class="sheet" id="sheet"></div>
+  <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" tabindex="-1"></div>
 </div>
 
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <!-- Tab bar -->
 <nav class="tabbar" id="tabbar">
@@ -271,6 +281,6 @@
 
 <input type="file" id="file-input" accept="application/json,.json" hidden />
 
-<script type="module" src="js/app.js"></script>
+<script type="module" src="js/app.js?v=2.3.0"></script>
 </body>
 </html>
