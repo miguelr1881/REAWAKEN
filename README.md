@@ -21,9 +21,9 @@ Una app de entrenamiento personal que funciona sin conexión, conserva tu histor
 
 ## Qué Es REAWAKEN
 
-REAWAKEN es una **PWA de registro de entrenamiento**, diseñada para consultarse y utilizarse entre series. Combina una rutina editable, registro rápido de peso y repeticiones, temporizadores, historial, mediciones InBody y análisis determinista del progreso.
+REAWAKEN es una **PWA de registro de entrenamiento**, diseñada para consultarse y utilizarse entre series. Combina una rutina editable, registro rápido de peso y repeticiones, temporizadores, historial, métricas semanales y una capa de análisis local orientada al progreso.
 
-La idea es sencilla: **registrar lo que hiciste sin convertir cada serie en un formulario**. Las repeticiones del plan ya están visibles, el peso anterior sirve de referencia y puedes corregir lo necesario directamente en el ejercicio.
+La idea es sencilla: **registrar lo que hiciste sin convertir cada serie en un formulario**. Las repeticiones del plan ya están visibles, el peso anterior sirve de referencia y puedes corregir lo necesario sin perder contexto.
 
 - **Uso local sin cuenta:** la información se guarda primero en el dispositivo.
 - **Sin conexión después de la primera carga:** la app almacena sus recursos para seguir funcionando en el gimnasio.
@@ -32,7 +32,7 @@ La idea es sencilla: **registrar lo que hiciste sin convertir cada serie en un f
 - **Nube opcional:** Supabase permite sincronizar; no es un requisito para entrenar.
 
 > [!IMPORTANT]
-> Este repositorio nació como una aplicación personal. Incluye una rutina, un perfil y mediciones iniciales personalizados. Antes de publicarlo o adaptarlo para otra persona, revisa esos datos. Las imágenes de ejemplo de este README utilizan datos ficticios.
+> Este repositorio nació como una aplicación personal. Incluye una rutina, un perfil y mediciones iniciales personalizados. Antes de publicarlo o adaptarlo para otra persona, revisa esos datos. Más abajo se indican los archivos sensibles.
 
 ## Vista Previa
 
@@ -45,9 +45,9 @@ Capturas de la interfaz generadas a **1760 × 1280 píxeles**. Abre cada imagen 
     <th>Evolución InBody</th>
   </tr>
   <tr>
-    <td><a href="app/data/guide-pdf.png"><img src="app/data/guide-pdf.png" width="300" alt="Ejemplo de rutina importada y abierta en el editor"></a></td>
-    <td><a href="app/data/guide-load.png"><img src="app/data/guide-load.png" width="300" alt="Peso anterior como referencia y sugerencia cualitativa de subir la carga"></a></td>
-    <td><a href="app/data/guide-inbody.png"><img src="app/data/guide-inbody.png" width="300" alt="Mediciones corporales y gráfica de evolución con datos ficticios"></a></td>
+    <td><a href="app/data/guide-pdf.webp"><img src="app/data/guide-pdf.webp" width="300" alt="Ejemplo de rutina importada y abierta en el editor"></a></td>
+    <td><a href="app/data/guide-load.webp"><img src="app/data/guide-load.webp" width="300" alt="Peso anterior como referencia y sugerencia cualitativa de subir la carga"></a></td>
+    <td><a href="app/data/guide-inbody.webp"><img src="app/data/guide-inbody.webp" width="300" alt="Mediciones corporales y gráfica de evolución con datos ficticios"></a></td>
   </tr>
 </table>
 
@@ -90,7 +90,7 @@ Cada día se organiza en bloques con sus ejercicios, series, repeticiones y desc
 Las prescripciones especiales, como fallo, tiempos o secuencias de repeticiones, no se convierten en un objetivo numérico inventado.
 
 > [!NOTE]
-> Los campos de carga no imponen kg o lb: algunos gimnasios mezclan ambas unidades. Usa siempre la referencia del equipo correspondiente. La app no puede detectar una unidad o máquina diferente si ese cambio no quedó registrado.
+> Los campos de carga no imponen kg o lb: algunos gimnasios mezclan ambas unidades. Usa siempre la referencia del equipo correspondiente. La app no puede detectar una unidad o máquina diferente sin datos explícitos.
 
 ### 2. Descansos, Temporizadores Y Cierre
 
@@ -98,7 +98,7 @@ Al registrar un peso nuevo y salir del campo, comienza el descanso correspondien
 
 Puedes pausar, reanudar, ajustar o cancelar el temporizador. La interfaz lo aparta visualmente cuando introduces un peso o abres una hoja para evitar que tape los controles.
 
-Los temporizadores de **ejercicio** tienen tres tonos al finalizar; los descansos permanecen silenciosos. En Ajustes hay una prueba de sonido y una opción experimental de audio multimedia, disponible cuando el navegador ofrece Audio Session.
+Los temporizadores de **ejercicio** tienen tres tonos al finalizar; los descansos permanecen silenciosos. En Ajustes hay una prueba de sonido y una opción experimental de audio multimedia, disponible solo donde el navegador la permita.
 
 Al finalizar una sesión se muestra:
 
@@ -112,13 +112,13 @@ Al finalizar una sesión se muestra:
 La duración puede corregirse en **horas y minutos**, entre un minuto y 24 horas, sin modificar la fecha original de la sesión.
 
 > [!WARNING]
-> El sonido depende del navegador, del volumen, del modo de silencio y de las restricciones de iOS. No tiene las garantías de una alarma nativa ni se promete que suene en segundo plano. La opción multimedia puede interrumpir música externa.
+> El sonido depende del navegador, del volumen, del modo de silencio y de las restricciones de iOS. No tiene las garantías de una alarma nativa ni se promete que suene en segundo plano. La opción multimedia sigue siendo experimental.
 
 ### 3. Importar Y Editar Rutinas
 
 En **Ajustes → Mi rutina** puedes editar el plan actual, importar otro o restaurar la rutina original incluida en el proyecto.
 
-El editor permite trabajar por días y modificar títulos, bloques, ejercicios, series, reps, descansos, tipo de registro, notas y grupo muscular. También incluye operaciones de organización como reordenar ejercicios, duplicar bloques y deshacer eliminaciones.
+El editor permite trabajar por días y modificar títulos, bloques, ejercicios, series, reps, descansos, tipo de registro, notas y grupo muscular. También incluye operaciones de organización como duplicar, mover y eliminar bloques o ejercicios.
 
 #### Desde un PDF
 
@@ -162,19 +162,19 @@ La sugerencia de subir requiere tres entrenamientos completos y comparables del 
 - Dentro de las últimas seis semanas, con al menos uno en las últimas dos.
 - Sin señales incompatibles, como molestias registradas o cambios de carga durante las series anteriores del entrenamiento actual.
 
-Si la última serie quedó por debajo de las reps previstas, puede sugerir bajar. En ejercicios asistidos, el mensaje habla de **más o menos asistencia**, porque la relación entre carga y dificultad es diferente.
+Si la última serie quedó por debajo de las reps previstas, puede sugerir bajar. En ejercicios asistidos, el mensaje habla de **más o menos asistencia**, porque la relación entre carga y dificultad se invierte.
 
-La sugerencia **nunca sustituye el peso anterior del campo ni cambia el plan del coach**. No requiere responder preguntas de esfuerzo. Las reps precargadas no demuestran que una serie haya sido fácil: la técnica y tus sensaciones siguen siendo imprescindibles.
+La sugerencia **nunca sustituye el peso anterior del campo ni cambia el plan del coach**. No requiere responder preguntas de esfuerzo. Las reps precargadas no demuestran que una serie haya sido finalizada.
 
 ### 5. Historial Y Tu Balance
 
-El historial permite consultar sesiones por fecha y abrir el detalle de los ejercicios realizados. El historial individual de un ejercicio presenta sus series, pesos y reps, sin obligarte a seleccionar un equipo.
+El historial permite consultar sesiones por fecha y abrir el detalle de los ejercicios realizados. El historial individual de un ejercicio presenta sus series, pesos y reps, sin obligarte a seleccionar una única métrica.
 
-Los registros antiguos mantienen el contexto que exista; no se reconstruyen repeticiones o esfuerzo que nunca se guardaron. Tampoco se presenta como comparable un máximo obtenido mezclando máquinas o unidades distintas.
+Los registros antiguos mantienen el contexto que exista; no se reconstruyen repeticiones o esfuerzo que nunca se guardaron. Tampoco se presenta como comparable un máximo obtenido mezclando máquinas, unidades o repeticiones incompatibles.
 
 **Tu balance** agrupa la información por día, semana, mes o ciclo y muestra trabajo registrado, tiempo, días entrenados, cumplimiento y participación muscular.
 
-Los indicadores circulares de los días de rutina reflejan la actividad de la **semana actual**, no un entrenamiento antiguo. La racha también se basa en semanas que cumplen tu objetivo, no en entrenar todos los días seguidos.
+Los indicadores circulares de los días de rutina reflejan la actividad de la **semana actual**, no un entrenamiento antiguo. La racha también se basa en semanas que cumplen tu objetivo, no en entrenamientos diarios consecutivos.
 
 La app permite eliminar sesiones y mediciones con confirmación y opciones de deshacer. Los datos derivados, incluidos los logros, se recalculan según el historial disponible.
 
@@ -182,7 +182,7 @@ La app permite eliminar sesiones y mediciones con confirmación y opciones de de
 
 **Muscle Battery** aparece en Tu balance y estima dónde se concentra el trabajo muscular reciente.
 
-Tiene en cuenta las series de fuerza de sesiones finalizadas en los últimos 14 días, la participación principal o secundaria de cada músculo y el tiempo transcurrido. El efecto de los registros disminuye con el tiempo.
+Tiene en cuenta las series de fuerza de sesiones finalizadas en los últimos 14 días, la participación principal o secundaria de cada músculo y el tiempo transcurrido. El efecto de los registros disminuye de forma gradual conforme pasan los días.
 
 Sus estados son:
 
@@ -192,10 +192,10 @@ Sus estados son:
 | **Recuperación en curso** | Permanece una carga estimada intermedia. |
 | **Menor carga reciente** | El trabajo registrado tiene menos peso en la estimación actual. |
 
-Cuando existen metadatos históricos compatibles, el motor puede incorporar contexto adicional de carga y esfuerzo. El registro sencillo actual no pregunta ni infiere esfuerzo a partir de las reps precargadas.
+Cuando existen metadatos históricos compatibles, el motor puede incorporar contexto adicional de carga y esfuerzo. El registro sencillo actual no pregunta ni infiere esfuerzo a partir de las reps ajustadas.
 
 > [!CAUTION]
-> No es una medición fisiológica ni un permiso para entrenar. No conoce tu sueño, alimentación, dolor o fatiga real. Sus reglas son heurísticas de producto, no parámetros médicos validados. La falta de datos tampoco equivale a estar recuperado.
+> No es una medición fisiológica ni un permiso para entrenar. No conoce tu sueño, alimentación, dolor o fatiga real. Sus reglas son heurísticas de producto, no parámetros médicos validados.
 
 ### 7. Lo Que Noté
 
@@ -209,21 +209,21 @@ Para generar una observación necesita:
 4. Separación entre reps precargadas, reps ajustadas y, cuando existe, esfuerzo histórico registrado.
 5. Un cambio de al menos un 5% entre la mediana de las tres sesiones anteriores y la de las tres recientes, sin solapamiento entre los grupos de cargas.
 
-No analiza ejercicios asistidos ni afirma que una variación de carga demuestre una ganancia o pérdida de fuerza. Puede no mostrar resultados si todavía falta historial o no aparece un patrón claro.
+No analiza ejercicios asistidos ni afirma que una variación de carga demuestre una ganancia o pérdida de fuerza. Puede no mostrar resultados si todavía falta historial o no aparece un patrón consistente.
 
-Además, una revisión separada puede detectar **ajustes repetidos de reps fuera del objetivo** y sugerir hablar con el coach. Dejar las reps precargadas no activa ese aviso ni cambia la rutina automáticamente.
+Además, una revisión separada puede detectar **ajustes repetidos de reps fuera del objetivo** y sugerir hablar con el coach. Dejar las reps precargadas no activa ese aviso ni cambia la rutina actual.
 
 ### 8. Mapa Muscular
 
 Cada ficha de ejercicio puede mostrar zonas principales y secundarias, además de un acceso a **Google Imágenes**. El mapa del día reúne los grupos de la rutina para visualizar su enfoque.
 
-La identificación parte del nombre del movimiento y puede ajustarse en el editor. La técnica y las variantes influyen: el mapa es orientativo y no sustituye una demostración del ejercicio o una valoración profesional.
+La identificación parte del nombre del movimiento y puede ajustarse en el editor. La técnica y las variantes influyen: el mapa es orientativo y no sustituye una demostración del ejercicio o una supervisión profesional.
 
 El enlace a Google requiere conexión y abre un servicio externo. Los mapas locales no dependen de esa búsqueda.
 
 ### 9. Stats Y Mediciones InBody
 
-Puedes introducir mediciones y pegar el texto de una hoja InBody para revisar sus valores antes de guardarlos. El lector incluye tratamiento de formatos habituales en español e inglés y comprobaciones de consistencia entre algunas medidas.
+Puedes introducir mediciones y pegar el texto de una hoja InBody para revisar sus valores antes de guardarlos. El lector incluye tratamiento de formatos habituales en español e inglés y comprobaciones para reducir errores frecuentes.
 
 Stats reúne indicadores como:
 
@@ -249,9 +249,9 @@ La colección contiene **48 trofeos en ocho etapas**:
 
 Cada etapa reúne seis medallas. Conseguir **cuatro de las seis** abre la siguiente; las restantes permanecen en la colección.
 
-Los logros reconocen sesiones, días distintos, series acumuladas, planes completados, semanas activas y objetivos semanales. No exigen récords de peso ni días consecutivos, y no es obligatorio completar la categoría semanal para avanzar.
+Los logros reconocen sesiones, días distintos, series acumuladas, planes completados, semanas activas y objetivos semanales. No exigen récords de peso ni días consecutivos, y no es obligatorio completar la colección para usar la app.
 
-La vista muestra una etapa a la vez, medallas ganadas con color y relieve, y el requisito de cada insignia al seleccionarla. No añade un panel de desafío semanal ni elige un «próximo trofeo» que tengas que perseguir.
+La vista muestra una etapa a la vez, medallas ganadas con color y relieve, y el requisito de cada insignia al seleccionarla. No añade un panel de desafío semanal ni elige un «próximo trofeo» automáticamente.
 
 Al cerrar una sesión puedes recibir una celebración breve por nuevos logros. Respeta la preferencia de reducir movimiento y no se repite al corregir la duración.
 
@@ -268,7 +268,7 @@ Al cerrar una sesión puedes recibir una celebración breve por nuevos logros. R
 - Guía rápida con ocho funciones especiales y ejemplos HD disponibles offline.
 - Consulta de versión y botón **Buscar actualización**.
 
-Cambiar el objetivo semanal no cambia la cantidad de días ni la rotación de la rutina. El perfil y la rutina comparten su actualización para sincronización; no conviene editarlos simultáneamente en varios dispositivos sin sincronizar.
+Cambiar el objetivo semanal no cambia la cantidad de días ni la rotación de la rutina. El perfil y la rutina comparten su actualización para sincronización; no conviene editarlos simultáneamente desde dispositivos diferentes sin sincronizar antes.
 
 <a id="primeros-pasos"></a>
 ## Primeros Pasos
@@ -286,7 +286,7 @@ Abre **http://localhost:8766/**. Si ese puerto está ocupado, utiliza otro, por 
 No hace falta instalar Node.js, ejecutar `npm install` ni compilar. Los recursos necesarios para la app están dentro de [app/](app/).
 
 > [!IMPORTANT]
-> No abras el HTML con doble clic: los módulos ES, las peticiones locales y el service worker necesitan un origen HTTP válido. Para instalación y uso offline utiliza `localhost` durante el desarrollo o un sitio con HTTPS al publicar.
+> No abras el HTML con doble clic: los módulos ES, las peticiones locales y el service worker necesitan un origen HTTP válido. Para instalación y uso offline utiliza `localhost` durante el desarrollo o una URL HTTPS publicada.
 
 ### Preparar Tu Primera Rutina
 
@@ -310,9 +310,9 @@ No hace falta instalar Node.js, ejecutar `npm install` ni compilar. Los recursos
 
 La app está diseñada con prioridad móvil, especialmente para Safari/PWA en iPhone. También puede utilizarse en navegadores de escritorio compatibles.
 
-**Importante:** `localhost` en el iPhone apunta al propio teléfono, no a tu computadora. Una dirección HTTP de tu red local puede permitir ver parte de la app, pero no ofrece las mismas condiciones de instalación y service worker que HTTPS.
+**Importante:** `localhost` en el iPhone apunta al propio teléfono, no a tu computadora. Una dirección HTTP de tu red local puede permitir ver parte de la app, pero no ofrece las mismas condiciones de instalación offline que una URL HTTPS publicada.
 
-La validación automatizada se ha realizado en Edge con tamaños móviles y de escritorio. La experiencia exacta de instalación, teclado, sonido y segundo plano requiere comprobación en un iPhone físico.
+La validación automatizada se ha realizado en Edge con tamaños móviles y de escritorio. La experiencia exacta de instalación, teclado, sonido y segundo plano requiere comprobación en un iPhone real.
 
 ## Sin Conexión Y Almacenamiento
 
@@ -332,17 +332,17 @@ La arquitectura es **offline-first**:
 | Consultar mediciones, trofeos y análisis locales | Buscar imágenes en Google |
 | Ver la guía y sus imágenes | Servicios externos que abras desde el navegador |
 
-Los datos pertenecen al **origen del sitio y al almacenamiento del navegador**. Cambiar de dominio, protocolo o puerto puede abrir un almacenamiento distinto. Un navegador diferente tampoco comparte automáticamente tu información.
+Los datos pertenecen al **origen del sitio y al almacenamiento del navegador**. Cambiar de dominio, protocolo o puerto puede abrir un almacenamiento distinto. Un navegador diferente tampoco comparte automáticamente tus datos locales.
 
-El almacenamiento local no es un respaldo permanente garantizado: puede perderse al borrar datos del sitio, limpiar el navegador o por políticas del sistema. Evita el modo privado para guardar tu historial de uso diario.
+El almacenamiento local no es un respaldo permanente garantizado: puede perderse al borrar datos del sitio, limpiar el navegador o por políticas del sistema. Evita el modo privado para guardar tu historial.
 
 ## Respaldo Y Restauración
 
 En **Ajustes → Respaldo** puedes exportar un archivo JSON e importar uno guardado anteriormente.
 
-El respaldo conserva información de sesiones, mediciones y rutinas, incluido el perfil vinculado a la rutina y los metadatos de entrenamiento utilizados por el análisis. No es una copia completa de las preferencias o credenciales del navegador.
+El respaldo conserva información de sesiones, mediciones y rutinas, incluido el perfil vinculado a la rutina y los metadatos de entrenamiento utilizados por el análisis. No es una copia completa del navegador ni del cache offline.
 
-Al importar, la app solicita confirmación y fusiona el contenido válido con lo que ya existe. **Los registros con el mismo identificador se sobrescriben**; por eso conviene exportar primero una copia del estado actual.
+Al importar, la app solicita confirmación y fusiona el contenido válido con lo que ya existe. **Los registros con el mismo identificador se sobrescriben**; por eso conviene exportar primero una copia reciente.
 
 Buenas prácticas:
 
@@ -352,7 +352,7 @@ Buenas prácticas:
 - No subas respaldos a un repositorio público: contienen información personal y corporal.
 - Mantén copias independientes aunque uses sincronización.
 
-El recordatorio de respaldo no aparece en cada sesión: necesita historial suficiente y considera un intervalo de 90 días desde la referencia más reciente aplicable. Puede cerrarse sin exportar.
+El recordatorio de respaldo no aparece en cada sesión: necesita historial suficiente y considera un intervalo de 90 días desde la referencia más reciente aplicable. Puede cerrarse sin exportar en ese momento.
 
 > [!WARNING]
 > **Borrar todo** elimina sesiones y mediciones mediante registros de borrado que también se sincronizan. No equivale a limpiar solo una copia local. La sincronización no sustituye un respaldo independiente.
@@ -372,7 +372,7 @@ La app funciona sin Supabase. Actívalo cuando necesites guardar una copia sincr
 7. Sincroniza y comprueba los datos antes de utilizar otro dispositivo.
 
 > [!CAUTION]
-> Nunca introduzcas una clave `service_role` ni una clave secreta en una aplicación cliente. La clave pública no sustituye la seguridad de la base de datos: las tablas deben tener RLS y políticas de acceso por usuario, como las del esquema incluido.
+> Nunca introduzcas una clave `service_role` ni una clave secreta en una aplicación cliente. La clave pública no sustituye la seguridad de la base de datos: las tablas deben tener RLS y políticas adecuadas.
 
 ### Proyectos Existentes
 
@@ -388,7 +388,7 @@ Si falta `routines.profile`, el perfil puede seguir guardándose localmente, per
 | `measures` | Fechas y valores de las mediciones corporales. |
 | `routines` | Rutina activa, ciclos archivados y perfil. |
 
-La integración utiliza las API REST de Supabase, sin su SDK. Resuelve conflictos por `updatedAt`: gana el registro completo más reciente, **no se fusionan campos individuales**. Evita editar el mismo registro desde dos dispositivos sin sincronizar entre cambios.
+La integración utiliza las API REST de Supabase, sin su SDK. Resuelve conflictos por `updatedAt`: gana el registro completo más reciente, **no se fusionan campos individuales**. Evita editar el mismo registro en dos dispositivos sin sincronizar entre cambios.
 
 Las eliminaciones de sesiones y mediciones se representan con `deletedAt` para que puedan propagarse. Los trofeos se recalculan a partir de los registros, no necesitan una tabla propia.
 
@@ -413,7 +413,7 @@ Revisa especialmente:
 - Capturas, documentos, vídeos y archivos de respaldo que hayas añadido.
 - Cualquier archivo de configuración local que contenga credenciales.
 
-**No publiques contraseñas, tokens, claves secretas ni respaldos personales.** Sustituye o retira los datos iniciales personales antes de presentar la app como una plantilla genérica. Este README no modifica esos archivos.
+**No publiques contraseñas, tokens, claves secretas ni respaldos personales.** Sustituye o retira los datos iniciales personales antes de presentar la app como una plantilla genérica. Este README no reemplaza una revisión de seguridad de tu proyecto.
 
 <a id="publicacion"></a>
 ## Publicación
@@ -441,11 +441,11 @@ Por ejemplo, para un sitio de proyecto:
 https://TU_USUARIO.github.io/TU_REPOSITORIO/app/
 ```
 
-La página principal del repositorio seguirá mostrando este README; la aplicación estará bajo `/app/` en Pages. Esta modalidad puede publicar otros archivos del repositorio como parte del sitio: revisa qué incluyes.
+La página principal del repositorio seguirá mostrando este README; la aplicación estará bajo `/app/` en Pages. Esta modalidad puede publicar otros archivos del repositorio como parte del sitio.
 
 #### Publicar únicamente la aplicación
 
-Configura un despliegue estático o un workflow de GitHub Actions cuyo directorio publicado sea **`app/`**. Así el HTML queda en la raíz del sitio resultante y la documentación del repositorio no forma parte del artefacto publicado.
+Configura un despliegue estático o un workflow de GitHub Actions cuyo directorio publicado sea **`app/`**. Así el HTML queda en la raíz del sitio resultante y la documentación del repositorio permanece separada.
 
 Este README describe ambas opciones; no crea un workflow ni realiza un despliegue automáticamente.
 
@@ -457,7 +457,7 @@ Después de publicar una versión:
 2. Comprueba la versión mostrada.
 3. Verifica que el historial siga disponible y que la app abra offline.
 
-Al desarrollar una nueva entrega, actualiza de forma coherente la versión de HTML/JavaScript y el nombre de caché de [app/sw.js](app/sw.js). Los nuevos recursos offline deben añadirse a su lista de archivos.
+Al desarrollar una nueva entrega, actualiza de forma coherente la versión de HTML/JavaScript y el nombre de caché de [app/sw.js](app/sw.js). Los nuevos recursos offline deben añadirse a su lista para que queden disponibles sin conexión.
 
 No cambies el identificador de IndexedDB para renombrar la aplicación: sigue siendo `gymtrack` para conservar los datos existentes.
 
@@ -547,7 +547,7 @@ Las sesiones conservan sus entradas por ejercicio y campos de contexto como:
 | `updatedAt` | Resolución de conflictos por fecha de actualización. |
 | `deletedAt` | Marca de borrado para propagación entre dispositivos. |
 
-En la sincronización, la copia de rutina se transporta dentro del JSON de entradas y se recupera al descargar. Mantener estos metadatos permite editar el plan actual sin reinterpretar sesiones anteriores.
+En la sincronización, la copia de rutina se transporta dentro del JSON de entradas y se recupera al descargar. Mantener estos metadatos permite editar el plan actual sin reinterpretar sesiones antiguas.
 
 No utilices una versión antigua de la app para editar datos creados con funciones de ciclos o contexto que aquella versión no entiende.
 
@@ -565,13 +565,13 @@ La suite actual reúne **116 comprobaciones** de inteligencia, progreso e import
 
 ### Pruebas De Interfaz
 
-Requisitos adicionales: Python, Microsoft Edge, Playwright, Pillow e `imageio-ffmpeg`. Esta última dependencia también es necesaria para importar el generador de ejemplos que utiliza la prueba de la guía. Instala las dependencias de las herramientas:
+Requisitos adicionales: Python, Microsoft Edge, Playwright, Pillow e `imageio-ffmpeg`. Esta última dependencia también es necesaria para importar el generador de ejemplos que utiliza la prueba de la guía.
 
 ```powershell
 python -m pip install playwright Pillow imageio-ffmpeg
 ```
 
-Los scripts utilizan Edge mediante `channel='msedge'`; no requieren descargar Chromium de Playwright. Mantén el servidor de la app activo en el puerto **8766**, utilizado por estas pruebas, y ejecútalas desde la raíz del repositorio:
+Los scripts utilizan Edge mediante `channel='msedge'`; no requieren descargar Chromium de Playwright. Mantén el servidor de la app activo en el puerto **8766**, utilizado por estas pruebas, y ejecuta:
 
 ```powershell
 python tools/test_simple_training.py
@@ -591,9 +591,9 @@ python tools/test_backup_reminder.py
 
 Las pruebas de interfaz utilizan contextos de navegador aislados y datos de ejemplo. **No deben introducirse fixtures en una pestaña con datos reales.**
 
-El script de la guía también regenera las imágenes de [app/data/](app/data/); ejecutarlo puede modificar esos archivos. Algunos scripts comprueban una versión concreta y deben actualizarse cuando cambia la entrega.
+El script de la guía también regenera las imágenes de [app/data/](app/data/); ejecutarlo puede modificar esos archivos. Algunos scripts comprueban una versión concreta y deben actualizarse cuando esa versión cambie.
 
-Consulta [VERIFICACION-IPHONE.md](VERIFICACION-IPHONE.md) para conocer qué se comprobó por versión y qué sigue pendiente. Una prueba con viewport móvil en Edge no equivale a una prueba física de Safari/iOS.
+Consulta [VERIFICACION-IPHONE.md](VERIFICACION-IPHONE.md) para conocer qué se comprobó por versión y qué sigue pendiente. Una prueba con viewport móvil en Edge no equivale a una prueba física en iPhone.
 
 ## Límites Del Producto
 
@@ -628,7 +628,7 @@ Es una referencia tenue de un registro anterior compatible. No está guardado co
 <details>
 <summary><strong>¿Por qué todavía no veo sugerencias o «Lo que noté»?</strong></summary>
 
-Son funciones diferentes con requisitos distintos. La subida cualitativa necesita tres entrenamientos completos y consistentes; una observación de tendencia necesita seis sesiones comparables y un cambio suficientemente claro. Las prescripciones especiales pueden quedar fuera del análisis.
+Son funciones diferentes con requisitos distintos. La subida cualitativa necesita tres entrenamientos completos y consistentes; una observación de tendencia necesita seis sesiones comparables y separación temporal mínima.
 
 </details>
 
@@ -642,7 +642,7 @@ No. Solo refleja una estimación a partir de lo registrado. No conoce dolor, fat
 <details>
 <summary><strong>¿Cambiar la rutina modifica mis entrenamientos anteriores?</strong></summary>
 
-Las sesiones con snapshot conservan su plan original. Editar el plan actual afecta a nuevas sesiones, no reescribe las anteriores ni una sesión ya iniciada. Los registros antiguos sin ese contexto se muestran con la información disponible.
+Las sesiones con snapshot conservan su plan original. Editar el plan actual afecta a nuevas sesiones, no reescribe las anteriores ni una sesión ya iniciada. Los registros antiguos sin ese contexto adicional se muestran tal como fueron guardados.
 
 </details>
 
@@ -679,7 +679,7 @@ No. También propaga cambios y borrados. Un respaldo independiente permite conse
 
 ## Componentes De Terceros
 
-- **PDF.js 4.10.38:** distribución local para extracción de texto, bajo Apache-2.0. Consulta su [documentación incluida](app/js/vendor/pdfjs/README.md) y [licencia](app/js/vendor/pdfjs/LICENSE).
+- **PDF.js 4.10.38:** distribución local para extracción de texto, bajo Apache-2.0. Consulta su [documentación incluida](app/js/vendor/pdfjs/README.md) y [licencia](app/js/vendor/pdfjs/LICENSE.txt).
 - **Barlow Semi Condensed:** fuente local; consulta [OFL.txt](app/fonts/OFL.txt).
 - **Iconos utilizados por la app:** conserva los avisos de licencia que acompañan a los recursos al redistribuirlos.
 
