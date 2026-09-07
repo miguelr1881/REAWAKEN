@@ -257,6 +257,7 @@ export function sanitizeRoutine(days) {
         name: String(m.name || 'Ejercicio').slice(0, 120),
         reps: String(m.reps || '—').slice(0, 40),
         kind: m.kind === 'check' ? 'check' : 'weight',
+        muscleGroup: typeof m.muscleGroup === 'string' ? m.muscleGroup.slice(0, 40) : undefined,
         timer: Number.isFinite(m.timer) ? m.timer : undefined,
         note: m.note ? String(m.note).slice(0, 300) : undefined
       })).filter(m => m.name)
