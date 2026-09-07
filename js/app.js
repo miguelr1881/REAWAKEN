@@ -10,7 +10,7 @@ import { sessionDuration, trainingAchievements } from './progress.js';
 import { createTrainingUI } from './training-ui.js';
 import { assisted, machineAlternative, equipmentChoice, setRecord, comparisonKey } from './intelligence.js';
 
-const APP_VERSION = '2.8.2';
+const APP_VERSION = '2.8.3';
 
 /* ============================== Estado ============================== */
 
@@ -277,7 +277,6 @@ function renderHome() {
 
   const finished = state.sessions.filter(s => s.finishedAt);
   const unlocked = achievementState().badges.filter(badge => badge.unlocked).length;
-  $('#achievement-count').textContent = unlocked;
   $('#btn-achievements').setAttribute('aria-label', `Logros: ${unlocked} desbloqueados`);
   $('#stat-week').textContent = `${finished.filter(s => s.startedAt >= weekStart(Date.now())).length}/${state.profile.daysPerWeek}`;
   $('#stat-total').textContent = finished.length;

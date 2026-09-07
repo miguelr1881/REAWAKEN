@@ -1430,7 +1430,6 @@ select:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
 .brand-line .trophy-icon { border-radius: 0; }
 .trophy-icon { filter: invert(1); flex: none; }
 :root[data-theme="light"] .trophy-icon { filter: none; }
-.achievements-button small { position: absolute; right: -5px; top: -5px; display: grid; place-items: center; min-width: 18px; height: 18px; padding-inline: 3px; border-radius: 50%; background: var(--text); color: var(--bg); font-size: 10px; }
 .hero #inbody-reminder:not(:empty) { margin-top: 16px; }
 .hero #inbody-reminder .routine-alert { margin: 0; border-radius: 0; border-width: 0 0 0 2px; padding: 10px 12px; background: color-mix(in srgb, var(--orange) 7%, transparent); }
 .hero #inbody-reminder strong { font-size: 13px; }
