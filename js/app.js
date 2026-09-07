@@ -7,10 +7,11 @@ import * as sync from './sync.js';
 import { MUSCLE_GROUPS, exerciseFocus, exerciseGroups, imageSearchUrl, muscleAtlas, dayFocus } from './exercise-info.js';
 import { normalizeProfile, validProfileDate, monthlyInBody } from './profile.js';
 import { sessionDuration, trainingAchievements } from './progress.js';
+import { enterView, resizeContent, disclose, bindDisclosures } from './motion.js';
 import { createTrainingUI } from './training-ui.js';
 import { assisted, machineAlternative, equipmentChoice, setRecord, comparisonKey } from './intelligence.js';
 
-const APP_VERSION = '2.8.8';
+const APP_VERSION = '2.8.9';
 
 /* ============================== Estado ============================== */
 
@@ -253,6 +254,7 @@ function lastPerformance(movementId, excludeId) {
 /* ============================== Vistas ============================== */
 
 function setView(name) {
+  const previousView = state.view;
   state.viewScroll[state.view] = window.scrollY;
   if (state.view === 'workout' && name !== 'workout') state.workoutScroll = window.scrollY;
   state.view = name;
@@ -264,6 +266,7 @@ function setView(name) {
   closeSheet();
   if (name !== 'workout') hideRest();
   window.scrollTo({ top: name === 'workout' ? state.workoutScroll || 0 : state.viewScroll[name] || 0 });
+  if (name !== previousView) enterView($(`#view-${name}`), 0);
 }
 
 /* ---------- Home ---------- */
@@ -1882,23 +1885,39 @@ function openAchievements() {
     $('#trophy-stage').innerHTML = `<section class="trophy-world" data-rank="${index}">
       <header class="trophy-world-header"><span class="eyebrow">${stage.available ? 'Colección' : 'Etapa bloqueada'} ${String(index + 1).padStart(2, '0')}</span><h3>${esc(stage.title)}</h3><div class="stage-gems" aria-hidden="true">${Array.from({ length: 4 }, (_, gem) => `<i class="${gem < stage.count ? 'earned' : ''}"></i>`).join('')}</div><p>${esc(stageStatus)}</p></header>
       <div class="medal-grid">${stage.badges.map((badge, badgeIndex) => `<button type="button" class="medal${badge.unlocked ? ' earned' : ''}" data-badge="${badgeIndex}" aria-expanded="false" aria-controls="medal-detail" aria-label="${esc(badge.title)}: ${badge.unlocked ? 'conseguido' : stage.available ? 'pendiente' : 'bloqueado'}" style="--medal-order:${badgeIndex}"><span class="medal-art" data-medal="${badgeIndex}" aria-hidden="true"><img class="trophy-icon" src="icons/${badgeIndex === 3 ? 'clipboard-check' : 'trophy'}.svg" alt="" width="30" height="30"><b>${badge.target}</b>${badge.unlocked ? '<span class="medal-check">✓</span>' : ''}</span><strong>${esc(badge.title)}</strong><small>${categories[badgeIndex]}</small></button>`).join('')}</div>
-      <div id="medal-detail" class="medal-detail" hidden></div></section>`;
+      <div id="medal-detail" class="medal-reveal" hidden></div></section>`;
     $$('.path-node').forEach(button => button.setAttribute('aria-pressed', String(Number(button.dataset.stage) === index)));
     $$('.medal').forEach(button => {
       button.onclick = () => {
         const expanded = button.getAttribute('aria-expanded') === 'true';
         $$('.medal').forEach(item => item.setAttribute('aria-expanded', 'false'));
         const detail = $('#medal-detail');
-        detail.hidden = expanded;
-        if (expanded) return;
+        if (expanded) {
+          disclose(detail, false);
+          return;
+        }
         button.setAttribute('aria-expanded', 'true');
         const badge = stage.badges[Number(button.dataset.badge)];
-        detail.innerHTML = `<span class="eyebrow">${badge.unlocked ? 'Conseguido' : stage.available ? 'En progreso' : 'Bloqueado'}</span><h4>${esc(badge.title)}</h4><p>${esc(badge.description)}</p><div><progress value="${badge.value}" max="${badge.target}" aria-label="${esc(badge.title)}"></progress><b>${badge.value} / ${badge.target}</b></div>${!stage.available ? `<small>${esc(stageStatus)}</small>` : ''}`;
-        detail.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        disclose(detail, true, () => {
+          detail.innerHTML = `<div class="medal-detail"><span class="eyebrow">${badge.unlocked ? 'Conseguido' : stage.available ? 'En progreso' : 'Bloqueado'}</span><h4>${esc(badge.title)}</h4><p>${esc(badge.description)}</p><div><progress value="${badge.value}" max="${badge.target}" aria-label="${esc(badge.title)}"></progress><b>${badge.value} / ${badge.target}</b></div>${!stage.available ? `<small>${esc(stageStatus)}</small>` : ''}</div>`;
+        }, () => {
+          if (button.getAttribute('aria-expanded') !== 'true' || !$('#sheet-backdrop').classList.contains('show')) return;
+          const sheet = $('#sheet');
+          const overflow = detail.getBoundingClientRect().bottom - sheet.getBoundingClientRect().bottom + 20;
+          if (overflow > 0) sheet.scrollBy({ top: overflow, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+        });
+        enterView(detail.firstElementChild);
       };
     });
   };
-  $$('.path-node').forEach(button => { button.onclick = () => renderStage(Number(button.dataset.stage)); });
+  $$('.path-node').forEach(button => {
+    button.onclick = () => {
+      if (button.getAttribute('aria-pressed') === 'true') return;
+      resizeContent($('#trophy-stage'), () => renderStage(Number(button.dataset.stage)));
+      enterView($('.trophy-world-header'));
+      button.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+    };
+  });
   renderStage(current.index);
   $('.path-node[aria-pressed="true"]').scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'instant' });
 }
@@ -1984,6 +2003,8 @@ let sheetFocus = null;
 
 function openSheet(html) {
   sheetToken++;
+  const replacing = $('#sheet-backdrop').classList.contains('show');
+  const previousHeight = $('#sheet').getBoundingClientRect().height;
   if (!$('#sheet-backdrop').classList.contains('show')) sheetFocus = document.activeElement;
   $('#sheet').innerHTML = html;
   $('#sheet .grabber')?.remove();
@@ -2003,6 +2024,11 @@ function openSheet(html) {
   $('#rest-timer').inert = true;
   document.body.classList.add('sheet-open');
   $('#sheet').focus({ preventScroll: true });
+  if (replacing) {
+    const sheet = $('#sheet');
+    sheet.style.height = `${previousHeight}px`;
+    resizeContent(sheet, () => { sheet.style.height = ''; });
+  }
 }
 
 function closeSheet(accepted = false) {
@@ -2019,7 +2045,10 @@ function closeSheet(accepted = false) {
   if (sheetFocus?.isConnected) sheetFocus.focus({ preventScroll: true });
   // Se vacía al terminar la animación: si no, los botones siguen en el DOM fuera de pantalla.
   const token = ++sheetToken;
-  setTimeout(() => { if (token === sheetToken) $('#sheet').innerHTML = ''; }, 260);
+  const closingAnimations = $('#sheet').getAnimations();
+  Promise.allSettled(closingAnimations.map(animation => animation.finished)).then(() => {
+    if (token === sheetToken) $('#sheet').replaceChildren();
+  });
   const dismiss = sheetDismiss;
   sheetDismiss = null;
   dismiss?.(accepted === true);
@@ -2464,6 +2493,7 @@ function bindGlobal() {
     resizeSheet();
   }
   $('#app-version').textContent = `REAWAKEN · ${APP_VERSION}`;
+  bindDisclosures(document);
   $('#btn-check-update').onclick = checkForUpdate;
   sync.onSyncChange(() => { if (state.view === 'settings') renderSync(); });
   window.addEventListener('online', () => { if (!state.session && !state.draft) sync.syncQuietly(); });
