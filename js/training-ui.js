@@ -1,4 +1,4 @@
-import { repPrescription, repTarget, machineAlternative, equipmentChoice, setRecord, nextSetAdvice, normalizeExercise, periodBounds, periodSummary, recoveryEstimate, trainingInsights, repChanges, weeklyRepAdvice } from './intelligence.js';
+import { repPrescription, repTarget, equipmentChoice, setRecord, nextSetAdvice, normalizeExercise, periodBounds, periodSummary, recoveryEstimate, trainingInsights, repChanges, weeklyRepAdvice } from './intelligence.js';
 import { MUSCLE_GROUPS, muscleAtlas, dayFocus } from './exercise-info.js';
 
 export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, saveSession, redraw, showSession, onSaveError = () => {} }) {
@@ -51,7 +51,6 @@ export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, sa
 
   function extras(session, movement, block) {
     if (movement.kind !== 'weight') return '';
-    const choice = equipmentChoice(session, movement);
     const next = Array.from({ length: block.sets }, (_, index) => index).find(index => {
       const raw = session.entries[movement.id]?.[index];
       return typeof raw !== 'string' || raw.trim() === '' || !Number.isFinite(Number(raw)) || Number(raw) < 0;
@@ -59,7 +58,7 @@ export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, sa
     const candidate = next !== undefined && repTarget(movement) ? nextSetAdvice(session, movement, next, state.sessions, dayFor) : null;
     const advice = candidate?.text === 'Primera referencia' ? null : candidate;
     const weekly = weeklyRepAdvice(session, movement, state.sessions, dayFor);
-    return `<div class="training-tools"><button data-equipment="${esc(movement.id)}" class="training-tool">${esc(choice.label)} · ${esc(choice.unit)}</button>${machineAlternative(movement) ? `<button class="training-tool" data-substitute="${esc(movement.id)}" title="Sustituir máquina"><img class="trophy-icon" src="icons/arrow-left-right.svg" alt="" width="18" height="18">Sustituir</button>` : ''}</div>${advice ? `<div class="next-advice"><div><span class="eyebrow">Siguiente · Serie ${next + 1}</span><strong>${esc(advice.text)}</strong><small>${esc(advice.reason)}</small></div></div>` : ''}${weekly ? `<p class="training-caption weekly-reps">${esc(weekly.text)}</p>` : ''}`;
+    return `${advice ? `<div class="next-advice"><div><span class="eyebrow">Siguiente · Serie ${next + 1}</span><strong>${esc(advice.text)}</strong><small>${esc(advice.reason)}</small></div></div>` : ''}${weekly ? `<p class="training-caption weekly-reps">${esc(weekly.text)}</p>` : ''}`;
   }
 
   function workoutNote(day) {
@@ -89,8 +88,6 @@ export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, sa
       };
       input.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); input.blur(); } };
     });
-    selectAll('#blocks [data-equipment]').forEach(button => { button.onclick = () => openEquipment(movementFor(button.dataset.equipment)); });
-    selectAll('#blocks [data-substitute]').forEach(button => { button.onclick = () => openEquipment(movementFor(button.dataset.substitute), true); });
   }
 
   function refreshAdvice(day, movementId) {
@@ -107,53 +104,6 @@ export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, sa
       else existing?.remove();
       bind(day);
     }
-  }
-
-  async function persistChange(change, button, onSuccess) {
-    const session = state.session;
-    const oldEntries = structuredClone(session.entries);
-    button.disabled = true;
-    change(session);
-    try { await saveSession(true); onSuccess(); }
-    catch {
-      session.entries = oldEntries;
-      button.disabled = false;
-      select('#training-error').textContent = 'No se pudo guardar. Intenta de nuevo.';
-    }
-  }
-
-  function openEquipment(movement, substitution = false) {
-    const current = equipmentChoice(state.session, movement);
-    const alternative = machineAlternative(movement);
-    const variant = substitution && current.variant === 'original' ? 'alternative' : current.variant;
-    const knownChoice = selectedVariant => {
-      if (selectedVariant === current.variant) return current;
-      const history = [state.session, ...state.sessions.filter(session => session.id !== state.session.id).sort((first, second) => second.startedAt - first.startedAt)];
-      for (const session of history) {
-        const previous = dayFor(session)?.blocks.flatMap(block => block.movements).find(item => normalizeExercise(item.name) === normalizeExercise(movement.name));
-        const records = previous ? session.entries?._training?.sets?.[previous.id] || [] : [];
-        const found = [...records].reverse().find(record => record?.variant === selectedVariant);
-        if (found) return found;
-      }
-      return { variant: selectedVariant, label: selectedVariant === 'original' ? 'Habitual' : '', unit: 'escala', step: 0 };
-    };
-    const choice = knownChoice(variant);
-    openSheet(`<h2>${substitution ? 'Sustituir máquina' : 'Equipo y carga'}</h2><p>${esc(movement.name)}</p>${alternative ? `<p class="equipment-candidate"><b>${esc(alternative.title)}</b><br>${esc(alternative.detail)}<br>Solo si está disponible. No equivale al mismo peso.</p>` : ''}<form id="equipment-form"><div class="field"><label for="equipment-variant">Equipo para esta sesión</label><select id="equipment-variant"><option value="original" ${variant === 'original' ? 'selected' : ''}>Habitual</option>${alternative ? `<option value="alternative" ${variant === 'alternative' ? 'selected' : ''}>Alternativa del mismo movimiento</option>` : ''}</select></div><div class="field"><label for="equipment-label">Nombre de esta máquina o equipo</label><input id="equipment-label" maxlength="60" required value="${esc(choice.label)}" placeholder="Ej. Polea del piso 2"></div><div class="result-fields"><div class="field"><label for="equipment-unit">Carga registrada</label><select id="equipment-unit">${['escala','kg','lb','kg por lado','lb por lado','kg por mancuerna','lb por mancuerna'].map(unit => `<option ${unit === choice.unit ? 'selected' : ''}>${unit}</option>`).join('')}</select></div><div class="field"><label for="equipment-step">Salto de carga</label><input id="equipment-step" type="number" inputmode="decimal" min="0" max="100" step="any" value="${choice.step || 0}"></div></div><p class="training-caption">0 = sin salto configurado. Las series anteriores conservan su equipo y carga.</p><p id="training-error" role="alert"></p><button class="btn btn-primary" type="submit">Usar este equipo</button></form>`);
-    select('#equipment-variant').onchange = () => {
-      const value = select('#equipment-variant').value;
-      const stored = knownChoice(value);
-      select('#equipment-label').value = stored?.label || '';
-      select('#equipment-step').value = stored?.step || 0;
-      select('#equipment-unit').value = stored?.unit || 'escala';
-    };
-    select('#equipment-form').onsubmit = event => {
-      event.preventDefault();
-      const label = select('#equipment-label').value.trim();
-      const step = Number(select('#equipment-step').value);
-      if (!label || !Number.isFinite(step) || step < 0 || step > 100) return;
-      const updated = { label, step, variant: select('#equipment-variant').value, unit: select('#equipment-unit').value };
-      persistChange(session => { tracking(session).choices[movement.id] = updated; }, select('#equipment-form [type="submit"]'), () => { closeSheet(); redraw(); });
-    };
   }
 
   function openProgress(mode = reportMode, anchor = reportAnchor, cycleId = reportCycle) {

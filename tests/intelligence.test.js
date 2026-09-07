@@ -16,8 +16,8 @@ export function runIntelligenceTests() {
   assert(repTarget(movement).max === 10, 'coach range');
   for (const reps of ['12+15+20', 'Al fallo', '20 s', '7+7+7', '0', '10-8']) assert(repTarget({ ...movement, reps }) === null, `special ${reps}`);
   assert(repTarget({ ...movement, note: 'Bajando peso en cada tramo' }) === null, 'dropsets excluded');
-  assert(nextSetAdvice(active, movement, 1, history, dayFor).load === 47.5, 'reduce excessive effort');
-  assert(nextSetAdvice(active, { ...movement, name: 'Dominadas asistidas' }, 1, [], dayFor).load === 52.5, 'assistance increases when reducing difficulty');
+  assert(nextSetAdvice(active, movement, 1, history, dayFor).direction === 'decrease', 'suggest reducing without a numeric load');
+  assert(nextSetAdvice(active, { ...movement, name: 'Dominadas asistidas' }, 1, [], dayFor).text === 'Considera más asistencia', 'assistance increases when reducing difficulty');
   active.entries._training.sets[movement.id][0].discomfort = true;
   assert(nextSetAdvice(active, movement, 1, history, dayFor).load === undefined, 'no progression with discomfort');
   delete active.entries._training.sets[movement.id][0].discomfort;
@@ -28,8 +28,35 @@ export function runIntelligenceTests() {
   active.entries._training.choices[movement.id] = { ...choice };
   active.entries._training.sets[movement.id][0].reps = 10;
   active.entries._training.sets[movement.id][0].rir = 3;
-  assert(nextSetAdvice(active, movement, 1, history, dayFor).load === 52.5, 'small increase supported by prior sessions');
-  assert(nextSetAdvice(active, movement, 1, [], dayFor).load === 50, 'no automatic rise from one easy set');
+  assert(nextSetAdvice(active, movement, 1, history, dayFor).direction === 'maintain', 'incomplete prior sessions do not support increasing');
+  assert(nextSetAdvice(active, movement, 1, [], dayFor).direction === 'maintain', 'no automatic rise from one easy set');
+  const consistent = [make(3), make(4), make(5)];
+  consistent.forEach(session => {
+    session.entries[movement.id] = ['50', '50'];
+    session.entries._training.sets[movement.id] = Array.from({ length: 2 }, () => ({ ...choice, load: 50, reps: 10, rir: null, repsSource: 'plan' }));
+  });
+  const freshAdvice = make(7); freshAdvice.startedAt = now; freshAdvice.finishedAt = null;
+  freshAdvice.entries[movement.id] = ['', '']; freshAdvice.entries._training.sets[movement.id] = [];
+  assert(nextSetAdvice(freshAdvice, movement, 0, consistent, dayFor).direction === 'increase', 'three complete consistent sessions support a qualitative increase without RIR');
+  assert(nextSetAdvice(freshAdvice, movement, 0, consistent, dayFor).load === undefined, 'increase never changes numeric prefill');
+  assert(nextSetAdvice(freshAdvice, movement, 0, consistent, dayFor).reason.includes('precargadas'), 'preset reps caveat visible');
+  assert(nextSetAdvice(freshAdvice, movement, 0, consistent.slice(1), dayFor).direction === 'maintain', 'two sessions insufficient');
+  const changedPlan = structuredClone(freshAdvice);
+  changedPlan.routineSnapshot.blocks[0].sets = 3;
+  assert(nextSetAdvice(changedPlan, movement, 0, consistent, dayFor).direction === 'maintain', 'changed set count does not support an increase');
+  for (const change of [
+    sessions => { sessions[2].entries._training.sets[movement.id][1].reps = 8; },
+    sessions => { sessions[2].entries[movement.id][1] = ''; },
+    sessions => { sessions[2].entries._training.sets[movement.id][1].unit = 'lb'; },
+    sessions => { sessions[2].entries._training.sets[movement.id][1].discomfort = true; },
+    sessions => { sessions[2].entries._cycle.id = 'other'; },
+    sessions => { sessions[2].startedAt = sessions[1].startedAt; },
+    sessions => { sessions.forEach(item => { item.startedAt -= 42 * 86400000; }); },
+    sessions => { sessions[2].entries[movement.id][0] = '55'; sessions[2].entries._training.sets[movement.id][0].load = 55; }
+  ]) {
+    const changed = structuredClone(consistent); change(changed);
+    assert(nextSetAdvice(freshAdvice, movement, 0, changed, dayFor).direction !== 'increase', 'inconsistent, mixed-unit, stale or same-day data prevents increase');
+  }
   assert(comparisonKey(movement, choice) !== comparisonKey(movement, { ...choice, unit: 'lb' }), 'units isolated');
   assert(trainingInsights(history, dayFor).length === 1, 'six comparable sessions create observation');
   assert(trainingInsights(history.slice(0, 5), dayFor).length === 0, 'five sessions insufficient');

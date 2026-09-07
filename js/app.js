@@ -10,7 +10,7 @@ import { sessionDuration, trainingAchievements } from './progress.js';
 import { createTrainingUI } from './training-ui.js';
 import { assisted, machineAlternative, equipmentChoice, setRecord, comparisonKey } from './intelligence.js';
 
-const APP_VERSION = '2.8.3';
+const APP_VERSION = '2.8.8';
 
 /* ============================== Estado ============================== */
 
@@ -239,12 +239,13 @@ function lastPerformance(movementId, excludeId) {
   for (const s of prev) {
     const original = sessionDay(s)?.blocks.flatMap(block => block.movements).find(item => item.id === movementId);
     if (!original || original.name !== movement.name || original.reps !== movement.reps) continue;
-    const vals = s.entries[movementId].filter((value, index) => {
-      if (typeof value !== 'string' || !recordedSet(value)) return false;
+    const vals = s.entries[movementId].map((value, index) => {
+      if (typeof value !== 'string' || !recordedSet(value)) return null;
       const record = setRecord(s, movementId, index);
-      return record ? comparisonKey(movement, choice) === comparisonKey(original, record) : !s.entries?._training && choice.variant === 'original' && choice.label === 'Habitual' && choice.unit === 'escala';
+      const compatible = record ? comparisonKey(movement, choice) === comparisonKey(original, record) : !s.entries?._training && choice.variant === 'original' && choice.label === 'Habitual' && choice.unit === 'escala';
+      return compatible ? value : null;
     });
-    if (vals.length) return { values: vals, at: s.startedAt };
+    if (vals.some(value => value !== null)) return { values: vals, at: s.startedAt };
   }
   return null;
 }
@@ -333,10 +334,14 @@ function renderHome() {
       ? `Última vez <em>${fmtDate(last.startedAt, { day: 'numeric', month: 'short' })}</em>`
       : 'Sin registros';
     const count = finished.filter(s => s.dayId === day.id).length;
-    const pct = last ? sessionProgress(last).pct : 0;
+        const currentWeek = new Date(weekStart(Date.now()));
+        const nextWeek = new Date(currentWeek);
+        nextWeek.setDate(nextWeek.getDate() + 7);
+        const weeklyLast = finished.filter(session => session.dayId === day.id && session.startedAt >= currentWeek.getTime() && session.startedAt < nextWeek.getTime()).sort((first, second) => second.startedAt - first.startedAt)[0];
+        const pct = weeklyLast ? sessionProgress(weeklyLast).pct : 0;
     const circ = 2 * Math.PI * 16;
-    const ring = last ? `
-          <svg class="ring" width="42" height="42" viewBox="0 0 42 42">
+        const ring = weeklyLast ? `
+          <svg class="ring" width="42" height="42" viewBox="0 0 42 42" role="img" aria-label="Esta semana: ${pct}% completado">
             <circle class="bg" cx="21" cy="21" r="16"/>
             <circle class="fg" cx="21" cy="21" r="16" stroke-dasharray="${circ}" stroke-dashoffset="${circ * (1 - pct / 100)}"/>
           </svg>` : '';
@@ -459,7 +464,7 @@ function renderBlocks(day) {
       const setsHtml = Array.from({ length: block.sets }, (_, i) => {
         if (mv.kind === 'weight') {
           const v = typeof vals[i] === 'string' ? vals[i] : '';
-          const ph = last?.values[i] ?? last?.values[0] ?? '–';
+          const ph = last?.values[i] ?? last?.values.find(value => value !== null) ?? '–';
           const isPr = best !== null && parseFloat(v) > best;
           return `<div class="set${v ? ' filled' : ''}${isPr ? ' pr' : ''}" data-mid="${mv.id}" data-idx="${i}" data-best="${best ?? ''}">
               <span class="n">${i + 1}</span>
@@ -489,7 +494,7 @@ function renderBlocks(day) {
               Cronometrar ${mv.timer} s
             </button>` : ''}
           ${mv.note ? `<div class="mv-note">${esc(mv.note)}</div>` : ''}
-          ${last ? `<div class="mv-last">Última vez: <b>${esc(last.values.join(' · '))}</b></div>` : ''}
+          ${last ? `<div class="mv-last">Última vez: <b>${esc(last.values.map(value => value ?? '–').join(' · '))}</b></div>` : ''}
           <div class="sets">${setsHtml}</div>
           <div data-training-extra="${esc(mv.id)}">${trainingUI.extras(s, mv, block)}</div>
           ${mv.kind === 'weight' && (block.rest ?? state.restSeconds) > 0 ? `<button class="mv-rest" data-seconds="${block.rest ?? state.restSeconds}" aria-label="Descansar después de ${esc(mv.name)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="13" r="8"/><path d="M12 8v5l3 2M9 2h6"/></svg>Descansar ${block.rest ?? state.restSeconds} s</button>` : ''}
@@ -985,31 +990,20 @@ function openMovementHistory(movementId) {
   const activeBlock = activeDay?.blocks.find(item => item.movements.some(movement => movement.id === movementId));
   const found = activeBlock ? { movement: activeBlock.movements.find(item => item.id === movementId), block: activeBlock } : findMovement(movementId);
   if (!found) return;
-  const { movement, block } = found;
-  const weighted = movement.kind === 'weight';
-  const equipment = new Map([['legacy', 'Equipo no registrado (antiguo)']]);
+  const { movement } = found;
   const rows = state.sessions
     .filter(s => s.finishedAt && s.entries?.[movementId])
     .sort((a, b) => b.startedAt - a.startedAt)
-    .filter(session => sessionDay(session)?.blocks.flatMap(item => item.movements).some(item => item.id === movementId && item.name === movement.name && item.reps === movement.reps))
-    .map(session => ({ at: session.startedAt, vals: session.entries[movementId], session }))
-    .filter(r => r.vals.some(v => v === true || (typeof v === 'string' && v.trim() !== '')));
-  for (const row of rows) row.vals.forEach((_, index) => {
-    const record = setRecord(row.session, movementId, index);
-    if (record) equipment.set(comparisonKey(movement, record), `${record.label} · ${record.unit}`);
-  });
-  const currentKey = state.session ? comparisonKey(movement, equipmentChoice(state.session, movement)) : 'legacy';
-  const render = key => {
-    const filtered = rows.map(row => ({ ...row, sets: row.vals.flatMap((value, index) => {
-      const record = setRecord(row.session, movementId, index);
-      if (!recordedSet(value) || (record ? comparisonKey(movement, record) : 'legacy') !== key) return [];
-      return [{ value, record }];
-    }) })).filter(row => row.sets.length);
-    openSheet(`<h2>${esc(movement.name)}</h2><p>${esc(movement.reps)} · ${block.sets} series${assisted(movement) ? ' · La carga indica asistencia, no fuerza levantada' : ''}</p><div class="field"><label for="history-equipment">Referencia de equipo</label><select id="history-equipment">${[...equipment].map(([id,label]) => `<option value="${esc(id)}" ${id === key ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></div>${filtered.length ? filtered.map(row => `<div class="movement-history-row"><b>${fmtDate(row.at, { day: 'numeric', month: 'short' })}</b><div>${row.sets.map(item => `<p>${weighted ? esc(item.value) : 'Completada'}${item.record ? ` · ${esc(trainingUI.recordText(item.record))}` : ''}</p>`).join('')}</div></div>`).join('') : '<p>Sin registros comparables para este equipo.</p>'}<button class="btn btn-ghost" id="mh-close">Cerrar</button>`);
-    $('#history-equipment').onchange = event => render(event.target.value);
-    $('#mh-close').onclick = closeSheet;
-  };
-  render(equipment.has(currentKey) ? currentKey : [...equipment.keys()].at(-1));
+    .map(session => ({ session, movement: sessionDay(session)?.blocks.flatMap(item => item.movements).find(item => item.id === movementId && item.name === movement.name) }))
+    .filter(row => row.movement)
+    .map(row => ({ ...row, sets: row.session.entries[movementId].flatMap((value, index) => recordedSet(value) ? [{ value, index, record: setRecord(row.session, movementId, index) }] : []) }))
+    .filter(row => row.sets.length);
+  openSheet(`<span class="eyebrow">Historial del ejercicio</span><h2>${esc(movement.name)}</h2>
+    <p class="movement-history-count">${plural(rows.length, 'sesión', 'sesiones')}</p>
+    <div class="movement-history">${rows.length ? rows.map(row => `<section class="movement-history-row">
+      <header><h3>${fmtDate(row.session.startedAt, { day: 'numeric', month: 'short', year: 'numeric' })}</h3><span>${esc(row.movement.reps)} · ${plural(row.sets.length, 'serie', 'series')}</span></header>
+      <div class="movement-history-sets">${row.sets.map(item => `<div class="movement-history-set"><span class="history-set-number">${item.index + 1}</span><strong>${row.movement.kind === 'weight' ? esc(item.value) : 'Hecha'}${item.record?.unit && item.record.unit !== 'escala' ? `<small>${esc(item.record.unit)}</small>` : ''}</strong><span>${item.record?.reps != null ? `${esc(item.record.reps)} reps` : esc(row.movement.reps)}</span>${item.record?.label && item.record.variant !== 'original' ? `<small class="history-set-equipment">${esc(item.record.label)}</small>` : ''}</div>`).join('')}</div>
+    </section>`).join('') : '<p class="movement-history-empty">Aún no has registrado este ejercicio.</p>'}</div>`);
 }
 
 /* ---------- Rutina: carga, importación y editor ---------- */
@@ -1864,47 +1858,64 @@ function achievementState() {
 
 function openFunctions() {
   const topics = [
-    ['Peso y reps', 'Las reps del plan aparecen arriba; el peso se registra debajo. Si hiciste otra cantidad, cambia las reps ahí mismo. No hay que confirmar cada serie en otro menú.'],
-    ['Descanso', 'Al registrar un peso nuevo y salir del campo, empieza el descanso. Corregir peso o reps no lo reinicia. Puedes pausarlo, ajustarlo o cancelarlo.'],
-    ['Tu balance', 'Reúne tus sesiones por día, semana, mes o ciclo. También muestra cuándo cambiaste las reps. La puntuación cuenta series registradas, no mide tu fuerza ni tu técnica.'],
-    ['Siguiente serie', 'Usa registros comparables del mismo equipo como referencia de carga. Si faltan datos, no calcula una subida. Las series y reps del coach no cambian solas.'],
-    ['Revisión semanal de reps', 'Si vienes cambiando las reps repetidamente, puede sugerir revisar el objetivo con tu coach. Dejar las reps precargadas no genera ese aviso.'],
-    ['Sustituir máquina', 'Propone otra máquina del mismo tipo, si existe en tu gym. Sus pesos se guardan separados: 20 en una máquina no tiene por qué equivaler a 20 en otra.'],
-    ['Recuperación muscular', 'Es una orientación basada en lo que registraste y el tiempo transcurrido. No sabe cómo te sientes y no es una medición médica.'],
-    ['Lo que noté', 'Compara la carga registrada en seis sesiones del mismo ejercicio y equipo. Distingue las reps del plan de las que ajustaste. Es una observación del historial, no una prueba de que ganaste o perdiste fuerza.'],
-    ['Trofeos y etapas', 'Hay 48 trofeos en 8 etapas. Consigue 4 de los 6 de tu etapa para avanzar; los demás quedan como colección. No necesitas récords ni días consecutivos. Todo sale de tu historial.'],
-    ['PDF, rutinas y ciclos', 'En Importar rutina puedes cargar un PDF con texto o pegar el plan. El archivo se lee en este dispositivo; revisa los avisos, reps y series en el editor antes de guardar. Los PDF escaneados necesitan Live Text. Marca nuevo ciclo solo si empiezas un plan nuevo. Las sesiones abiertas y anteriores conservan su rutina.'],
-    ['Historial y duración', 'En Historial puedes abrir una sesión y consultar sus series. La duración se puede corregir sin cambiar la fecha del entrenamiento.'],
-    ['InBody', 'Guarda tus mediciones y compara su evolución en Stats. El aviso mensual es un recordatorio, no un requisito para entrenar ni ganar trofeos.'],
-    ['Respaldo y sincronización', 'La app guarda datos en este dispositivo y funciona sin conexión. Exportar crea una copia en un archivo. Si conectas Supabase, también sincroniza; conservar un respaldo sigue siendo útil. Borrar historial recalcula los trofeos.']
+    ['Rutina desde PDF', 'Del documento a un plan editable', 'Carga el PDF de tu coach: la app extrae los días, ejercicios, series y reps en este dispositivo. Revisa los avisos y corrige el resultado antes de guardar. Un nuevo ciclo separa el balance del plan anterior sin cambiar tus sesiones pasadas.', 'Necesita un PDF con texto; para un escaneo usa Live Text y pega el contenido. No interpreta todos los diseños ni sustituye la revisión.', 'guide-pdf.png'],
+    ['Sugerencias de carga', 'Subir, mantener o bajar; sin cifras', 'Puede sugerir subir tras tres entrenamientos completos en días distintos, con todas las series en las reps altas del plan y la misma carga registrada. Busca en las últimas seis semanas y exige un registro en las últimas dos. Si la última serie quedó por debajo del objetivo, sugiere bajar; en ejercicios asistidos habla de más o menos ayuda.', 'No convierte kg y lb ni cambia el peso anterior del campo. Comprueba que sigues usando el mismo equipo y unidad: no puede detectar un cambio que no quedó registrado. Las reps precargadas no demuestran facilidad; sube solo si mantienes una técnica cómoda.', 'guide-load.png'],
+    ['Muscle Battery', 'La carga reciente de cada grupo muscular', 'En Tu balance, Muscle Battery reúne las series de fuerza de tus sesiones finalizadas durante los últimos 14 días. Distribuye el trabajo entre músculos principales y secundarios y reduce su peso con el tiempo. Muestra tres estados: carga reciente elevada, recuperación en curso o menor carga reciente.', 'Es una estimación, no una batería real ni permiso para volver a entrenar. No conoce tu sueño, alimentación, dolor o fatiga; sin registros suficientes no puede valorar una zona. El registro sencillo no mide esfuerzo.', null],
+    ['Lo que noté', 'Cambios sostenidos, con su historial detrás', 'En Tu balance aparecen observaciones cuando la primera serie de un ejercicio reúne seis sesiones comparables en seis días distintos, a lo largo de al menos dos semanas. Compara las tres anteriores con las tres recientes y busca un cambio de carga de al menos un 5%, sin solapamiento entre grupos. Puedes abrir las sesiones que sustentan cada observación.', 'Separa equipo, unidad, reps y su origen: precargadas o ajustadas. No analiza ejercicios asistidos ni demuestra que ganaste o perdiste fuerza. Puede no mostrar nada si falta historial o no hay un cambio claro; no inventa una conclusión.', null],
+    ['Tu balance', 'Tu entrenamiento por día, semana, mes o ciclo', 'Reúne sesiones, tiempo registrado, series realizadas y participación muscular del periodo. También muestra las reps que ajustaste frente al plan. Si esos ajustes se repiten, puede sugerir revisar el objetivo con tu coach.', 'El cumplimiento cuenta series registradas, no mide técnica ni intensidad. Dejar las reps precargadas no activa la revisión semanal; la app no cambia el plan automáticamente.', null],
+    ['Mapa muscular', 'Los músculos de cada ejercicio', 'La ficha del ejercicio señala las zonas principales y secundarias y ofrece un enlace a Google Imágenes. El mapa de cada día reúne los grupos musculares de tu rutina para mostrar su enfoque.', 'Es orientativo: la técnica y la variante influyen. Identificar los músculos de un ejercicio no indica si están recuperados ni sustituye una valoración profesional.', null],
+    ['Evolución InBody', 'Mediciones que puedes comparar', 'Pega el texto de tu hoja InBody para revisar y guardar sus mediciones. Stats reúne peso, músculo, grasa y puntuación, y dibuja su evolución entre fechas. Puedes comprobar el resumen antes de confirmar los datos.', 'La lectura depende del texto disponible y puede necesitar correcciones. Las tendencias reflejan mediciones, no resultados atribuibles a una sola sesión.', 'guide-inbody.png'],
+    ['Trofeos y etapas', 'Tu colección crece contigo', 'Ocho etapas reúnen tus insignias de entrenamiento. Cuatro medallas de una etapa abren la siguiente. Cada insignia guarda su requisito y tu avance; al terminar una sesión aparecen los nuevos logros que ganaste.', 'Se calculan desde tu historial: no necesitas registrar marcas máximas ni entrenar todos los días. Si eliminas sesiones, el progreso se recalcula.', null]
   ];
-  openSheet(`<h2>Funciones</h2><div class="functions-guide">${topics.map(([title, text]) => `<details><summary>${esc(title)}</summary><p>${esc(text)}</p></details>`).join('')}</div>`);
-}
-
-function nextTrophyHtml(achievements) {
-  const { nextBadge, current } = achievements;
-  if (!nextBadge) return '<section class="next-trophy"><span class="eyebrow">Colección completa</span><h3>48 de 48 trofeos</h3><p>Todos tus logros están en la colección.</p></section>';
-  return `<section class="next-trophy"><span class="eyebrow">Próximo trofeo · ${esc(achievements.stages[nextBadge.stage].title)}</span><h3>${esc(nextBadge.title)}</h3><p>${esc(nextBadge.remainingText)}</p><div class="next-trophy-progress"><progress value="${nextBadge.value}" max="${nextBadge.target}" aria-label="Progreso hacia ${esc(nextBadge.title)}"></progress><b>${nextBadge.value} / ${nextBadge.target}</b></div>${!current.completed ? `<small>${current.count} de 4 trofeos para ${current.index === achievements.stages.length - 1 ? 'completar Legado' : `abrir ${esc(achievements.stages[current.index + 1].title)}`}.</small>` : ''}</section>`;
+  openSheet(`<h2>Funciones especiales</h2><div class="functions-guide">${topics.map(([title, subtitle, description, limitation, image]) => `<details><summary><span>${esc(title)}<small>${esc(subtitle)}</small></span></summary>${image ? `<figure class="function-example"><img src="data/${image}" width="440" height="320" loading="lazy" alt="Ejemplo de ${esc(title)} con datos ficticios"><figcaption>Ejemplo · Datos ficticios</figcaption></figure>` : ''}<p>${esc(description)}</p><p class="function-limit">${esc(limitation)}</p></details>`).join('')}</div>`);
 }
 
 function openAchievements() {
-  const achievements = achievementState();
-  const { badges, week, stages, current } = achievements;
-  const unlocked = badges.filter(badge => badge.unlocked).length;
-  openSheet(`<span class="eyebrow">Tu colección · ${unlocked} / ${badges.length}</span><h2>Trofeos</h2>
-    <section class="achievement-rank" data-rank="${current.index}"><div class="rank-emblem" aria-hidden="true"><img class="trophy-icon" src="icons/trophy.svg" alt="" width="32" height="32"><b>${String(current.index + 1).padStart(2, '0')}</b></div><div><span class="eyebrow">Etapa ${current.index + 1} de ${stages.length}</span><h3>${esc(current.title)}</h3><p>${current.completed ? 'Todas las etapas superadas. Tu colección sigue.' : `${Math.min(current.count, current.target)} / ${current.target} trofeos para ${current.index === stages.length - 1 ? 'superar esta etapa' : 'avanzar'}`}</p><progress value="${Math.min(current.count, current.target)}" max="${current.target}" aria-label="Progreso de etapa"></progress></div></section>
-    <section class="weekly-challenge"><span class="eyebrow">Desafío semanal</span><div><h3>${week.value === week.target ? 'Objetivo cumplido' : 'Una semana a tu ritmo'}</h3><strong>${week.value}<small> / ${week.target}</small></strong></div><progress value="${week.value}" max="${week.target}" aria-label="Días entrenados esta semana"></progress><p>${week.target} días de entrenamiento · Lunes a domingo</p></section>
-    ${nextTrophyHtml(achievements)}
-    <div class="achievement-stages">${stages.map(stage => `<details class="achievement-stage" data-rank="${stage.index}" ${stage.index === current.index ? 'open' : ''}><summary><span class="stage-number">${String(stage.index + 1).padStart(2, '0')}</span><span><strong>${esc(stage.title)}</strong><small>${stage.completed ? 'Etapa superada' : stage.available ? `${stage.count} de 4 para avanzar` : `Se abre con 4 trofeos en ${esc(stages[stage.index - 1].title)}`}</small></span><b>${stage.count}/6</b></summary><div class="achievement-list">${stage.badges.map(badge => `<article class="achievement${badge.unlocked ? ' unlocked' : ''}"><div class="achievement-emblem"><img class="trophy-icon" src="icons/trophy.svg" alt="" width="28" height="28"></div><div><span class="achievement-state">${badge.unlocked ? 'Desbloqueado' : stage.available ? 'En progreso' : `Requiere superar ${esc(stages[stage.index - 1].title)}`}</span><h3>${esc(badge.title)}</h3><p>${esc(badge.description)}</p><progress value="${badge.value}" max="${badge.target}" aria-label="${esc(badge.title)}"></progress><small>${badge.value} / ${badge.target}</small></div></article>`).join('')}</div></details>`).join('')}</div>`);
+  const { stages, current } = achievementState();
+  const categories = ['Sesiones', 'Días', 'Series', 'Planes', 'Semanas', 'Constancia'];
+  openSheet(`<div class="trophy-room"><div class="trophy-room-heading"><h2>Trofeos</h2><span class="eyebrow">Etapa ${current.index + 1} · ${esc(current.title)}</span></div>
+    <nav class="trophy-path" aria-label="Etapas de la colección">${stages.map(stage => `<button type="button" data-stage="${stage.index}" class="path-node${stage.completed ? ' cleared' : ''}${stage.available ? '' : ' locked'}" aria-label="${esc(stage.title)}: ${stage.completed ? 'superada' : stage.available ? 'actual' : 'bloqueada'}" aria-pressed="${stage.index === current.index}" ${stage.index === current.index ? 'aria-current="step"' : ''} title="${esc(stage.title)}"><span>${stage.index + 1}</span></button>`).join('')}</nav>
+    <div id="trophy-stage"></div></div>`);
+  const renderStage = index => {
+    const stage = stages[index];
+    const stageStatus = stage.completed ? 'Etapa superada' : stage.available ? `${stage.count} / 4 medallas para ${index === stages.length - 1 ? 'completar Legado' : 'avanzar'}` : `Se abre al superar ${stages[index - 1].title}`;
+    $('#trophy-stage').innerHTML = `<section class="trophy-world" data-rank="${index}">
+      <header class="trophy-world-header"><span class="eyebrow">${stage.available ? 'Colección' : 'Etapa bloqueada'} ${String(index + 1).padStart(2, '0')}</span><h3>${esc(stage.title)}</h3><div class="stage-gems" aria-hidden="true">${Array.from({ length: 4 }, (_, gem) => `<i class="${gem < stage.count ? 'earned' : ''}"></i>`).join('')}</div><p>${esc(stageStatus)}</p></header>
+      <div class="medal-grid">${stage.badges.map((badge, badgeIndex) => `<button type="button" class="medal${badge.unlocked ? ' earned' : ''}" data-badge="${badgeIndex}" aria-expanded="false" aria-controls="medal-detail" aria-label="${esc(badge.title)}: ${badge.unlocked ? 'conseguido' : stage.available ? 'pendiente' : 'bloqueado'}" style="--medal-order:${badgeIndex}"><span class="medal-art" data-medal="${badgeIndex}" aria-hidden="true"><img class="trophy-icon" src="icons/${badgeIndex === 3 ? 'clipboard-check' : 'trophy'}.svg" alt="" width="30" height="30"><b>${badge.target}</b>${badge.unlocked ? '<span class="medal-check">✓</span>' : ''}</span><strong>${esc(badge.title)}</strong><small>${categories[badgeIndex]}</small></button>`).join('')}</div>
+      <div id="medal-detail" class="medal-detail" hidden></div></section>`;
+    $$('.path-node').forEach(button => button.setAttribute('aria-pressed', String(Number(button.dataset.stage) === index)));
+    $$('.medal').forEach(button => {
+      button.onclick = () => {
+        const expanded = button.getAttribute('aria-expanded') === 'true';
+        $$('.medal').forEach(item => item.setAttribute('aria-expanded', 'false'));
+        const detail = $('#medal-detail');
+        detail.hidden = expanded;
+        if (expanded) return;
+        button.setAttribute('aria-expanded', 'true');
+        const badge = stage.badges[Number(button.dataset.badge)];
+        detail.innerHTML = `<span class="eyebrow">${badge.unlocked ? 'Conseguido' : stage.available ? 'En progreso' : 'Bloqueado'}</span><h4>${esc(badge.title)}</h4><p>${esc(badge.description)}</p><div><progress value="${badge.value}" max="${badge.target}" aria-label="${esc(badge.title)}"></progress><b>${badge.value} / ${badge.target}</b></div>${!stage.available ? `<small>${esc(stageStatus)}</small>` : ''}`;
+        detail.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+      };
+    });
+  };
+  $$('.path-node').forEach(button => { button.onclick = () => renderStage(Number(button.dataset.stage)); });
+  renderStage(current.index);
+  $('.path-node[aria-pressed="true"]').scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'instant' });
 }
 
 function openDurationEditor(session, onSaved) {
-  openSheet(`<h2>Duración del entrenamiento</h2><form id="duration-form"><div class="field"><label for="duration-minutes">Minutos entrenados</label><input id="duration-minutes" type="number" inputmode="numeric" min="1" max="1440" step="1" required value="${Math.max(1, Math.round(sessionDuration(session) / 60000))}"></div><p id="duration-error" role="alert"></p><button class="btn btn-primary" type="submit">Guardar duración</button><button class="btn btn-ghost" id="duration-cancel" type="button">Cancelar</button></form>`);
+  const totalMinutes = Math.min(1440, Math.max(1, Math.round(sessionDuration(session) / 60000)));
+  openSheet(`<h2>Duración del entrenamiento</h2><form id="duration-form"><div class="result-fields"><div class="field"><label for="duration-hours">Horas</label><input id="duration-hours" type="number" inputmode="numeric" min="0" max="24" step="1" required value="${Math.floor(totalMinutes / 60)}"></div><div class="field"><label for="duration-minutes">Minutos</label><input id="duration-minutes" type="number" inputmode="numeric" min="0" max="59" step="1" required value="${totalMinutes % 60}"></div></div><p id="duration-error" role="alert"></p><button class="btn btn-primary" type="submit">Guardar duración</button><button class="btn btn-ghost" id="duration-cancel" type="button">Cancelar</button></form>`);
   $('#duration-cancel').onclick = onSaved;
   $('#duration-form').onsubmit = async event => {
     event.preventDefault();
-    const minutes = Number($('#duration-minutes').value);
-    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) return;
+    const hoursInput = $('#duration-hours'), minutesInput = $('#duration-minutes');
+    const hours = Number(hoursInput.value), remainder = Number(minutesInput.value);
+    const minutes = hours * 60 + remainder;
+    if (!hoursInput.validity.valid || !minutesInput.validity.valid || !Number.isInteger(hours) || !Number.isInteger(remainder) || minutes < 1 || minutes > 1440) {
+      $('#duration-error').textContent = 'Introduce una duración entre 1 minuto y 24 horas.';
+      return;
+    }
     const button = $('#duration-form [type="submit"]');
     button.disabled = true;
     const updated = { ...session, entries: { ...session.entries, _durationMinutes: minutes } };
@@ -1925,13 +1936,11 @@ function openDurationEditor(session, onSaved) {
 function showWorkoutSummary(session, newlyUnlocked = [], celebrate = true) {
   const day = sessionDay(session);
   const progress = sessionProgress(session);
-  const achievements = achievementState();
   const previous = state.sessions.filter(item => item.id !== session.id && item.finishedAt && item.routineSnapshot && item.startedAt < session.startedAt && item.dayId === session.dayId && JSON.stringify(item.routineSnapshot) === JSON.stringify(day)).sort((first, second) => second.startedAt - first.startedAt)[0];
   const change = previous ? progress.pct - sessionProgress(previous).pct : null;
   const completedBlocks = day.blocks.filter(block => block.movements.every(movement => (session.entries[movement.id] || []).slice(0, block.sets).filter(recordedSet).length === block.sets)).length;
   openSheet(`<span class="eyebrow">Sesión finalizada</span><h2>${esc(day.title)}</h2>
     ${newlyUnlocked.length ? `<section class="trophy-celebration${celebrate ? ' celebrating' : ''}" role="status"><div class="trophy-confetti" aria-hidden="true">${Array.from({ length: 12 }, (_, index) => `<i style="--piece:${index}"></i>`).join('')}</div><img class="trophy-icon celebration-emblem" src="icons/trophy.svg" alt="" width="56" height="56"><span class="eyebrow">${newlyUnlocked.length === 1 ? 'Trofeo desbloqueado' : `${newlyUnlocked.length} trofeos desbloqueados`}</span><h3>${esc(newlyUnlocked[0].title)}</h3>${newlyUnlocked.length > 1 ? `<p>${newlyUnlocked.slice(1, 3).map(badge => esc(badge.title)).join(' · ')}</p>` : ''}${newlyUnlocked.length > 3 ? `<details><summary>Ver los otros ${newlyUnlocked.length - 3} trofeos</summary><p>${newlyUnlocked.slice(3).map(badge => esc(badge.title)).join(' · ')}</p></details>` : ''}</section>` : ''}
-    ${nextTrophyHtml(achievements)}
     <div class="session-score"><div><span>Progress score</span><strong>${progress.pct}<small>/100</small></strong></div><div class="score-context"><b>${progress.pct === 100 ? 'Plan completado' : 'Trabajo registrado'}</b><span>${progress.done} de ${progress.total} series</span>${change !== null ? `<small>${change > 0 ? '+' : ''}${change} puntos vs. sesión anterior</small>` : ''}</div></div>
     <div class="summary-grid"><div><b>${progress.done}</b><span>Series</span></div><div><b>${completedBlocks}/${day.blocks.length}</b><span>Bloques</span></div><div><b>${Math.round(sessionDuration(session) / 60000)}</b><span>Minutos</span></div></div>
     <button class="btn btn-ghost duration-edit" id="summary-duration">Editar duración</button>

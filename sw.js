@@ -1,4 +1,4 @@
-const CACHE = 'reawaken-v22';
+const CACHE = 'reawaken-v27';
 const ASSETS = [
   './',
   './index.html',
@@ -19,10 +19,12 @@ const ASSETS = [
   './js/inbody.js',
   './js/sync.js',
   './data/seed-measures.json',
+  './data/guide-pdf.png',
+  './data/guide-load.png',
+  './data/guide-inbody.png',
   './manifest.webmanifest',
   './icons/icon-180.png',
   './icons/trophy.svg',
-  './icons/arrow-left-right.svg',
   './icons/clipboard-check.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',

@@ -85,23 +85,31 @@ export function nextSetAdvice(session, movement, index, sessions, dayFor) {
   const last = current.at(-1) || prior[0];
   if (!last) return { text: 'Primera referencia', reason: 'Elige una carga cómoda para este equipo; no copiamos cargas de otras máquinas.' };
   if (last.discomfort) return { text: 'Detén este ejercicio si hay dolor', reason: 'Sin recomendaciones de carga tras registrar molestia.' };
-  let load = last.load;
-  let reason = 'Mantén la referencia de este equipo y las reps del coach.';
-  const step = Number(choice.step);
-  const direction = assisted(movement) ? -1 : 1;
-  const excessive = last.reps < target.min || last.rir === 0;
-  const strong = last.reps >= target.max && last.rir >= 3;
-  const supporting = prior.filter(row => row.reps >= target.max && row.rir >= 2 && row.load === last.load);
-  const supportCount = new Set(supporting.map(row => row.session.id)).size;
-  if (Number.isFinite(step) && step > 0 && step <= Math.max(load * 0.1, 0.5)) {
-    if (excessive) { load -= direction * step; reason = assisted(movement) ? 'Más ayuda: la última serie quedó por debajo del objetivo o sin margen.' : 'Un paso menos: la última serie quedó por debajo del objetivo o sin margen.'; }
-    else if (strong && supportCount >= 2 && !current.some(record => record.load !== current[0].load)) {
-      load += direction * step;
-      reason = assisted(movement) ? 'Un paso menos de ayuda, con margen repetido en sesiones anteriores.' : 'Un paso más, con margen en la última serie y apoyo de al menos dos sesiones.';
-    }
-  } else if (excessive) return { text: assisted(movement) ? 'Considera más asistencia' : 'Considera bajar la carga', reason: 'El salto disponible no está configurado o es demasiado grande para calcular un ajuste prudente.' };
-  if (load < 0 || !Number.isFinite(load)) return { text: 'Mantén una carga cómoda', reason: 'Sin ajuste numérico adecuado para este equipo.' };
-  return { load: Math.round(load * 100) / 100, text: `${Math.round(load * 100) / 100} · ${movement.reps} reps`, reason, unit: choice.unit, target };
+  if (last.reps < target.min || last.rir === 0) return {
+    direction: 'decrease', text: assisted(movement) ? 'Considera más asistencia' : 'Considera bajar la carga',
+    reason: 'La última serie quedó por debajo de las reps previstas o sin margen. Prioriza la técnica.'
+  };
+  const cycle = session.entries?._cycle?.id || 'legacy';
+  const recent = sessions.filter(item => !item.deletedAt && item.finishedAt && item.id !== session.id &&
+    item.startedAt < session.startedAt && session.startedAt - item.startedAt <= 42 * 86400000 &&
+    (item.entries?._cycle?.id || 'legacy') === cycle)
+    .map(item => ({ session: item, block: dayFor(item)?.blocks.find(block => block.movements.some(entry => entry.id === movement.id && comparisonKey(entry, choice) === key)) }))
+    .filter(item => item.block)
+    .sort((first, second) => second.session.startedAt - first.session.startedAt)
+    .slice(0, 3);
+  const consistent = recent.length === 3 && new Set(recent.map(item => localDay(item.session.startedAt))).size === 3 &&
+    session.startedAt - recent[0].session.startedAt <= 14 * 86400000 &&
+    recent.every(item => item.block.sets === recent[0].block.sets && Array.from({ length: item.block.sets }, (_, setIndex) => {
+      const record = setRecord(item.session, movement.id, setIndex);
+      return record && comparisonKey(movement, record) === key && !record.discomfort && record.rir !== 0 &&
+        Number.isInteger(record.reps) && record.reps >= target.max && record.load === last.load;
+    }).every(Boolean));
+  const currentBlock = dayFor(session)?.blocks.find(block => block.movements.some(item => item.id === movement.id));
+  if (consistent && currentBlock?.sets === recent[0].block.sets && !current.some(record => record.discomfort || record.load !== last.load || record.reps < target.max || record.rir === 0)) return {
+    direction: 'increase', text: assisted(movement) ? 'Considera menos asistencia' : 'Considera subir la carga',
+    reason: 'Tres sesiones completas con la misma carga. Si mantuviste buena técnica, prueba un paso pequeño. Las reps precargadas no miden esfuerzo.'
+  };
+  return { direction: 'maintain', text: 'Mantén la carga', reason: 'Conserva tu referencia mientras reúnes más sesiones consistentes. Comprueba el equipo y la unidad antes de usar el peso anterior.' };
 }
 
 export function muscleContributions(movement) {
