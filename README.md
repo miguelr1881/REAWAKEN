@@ -45,9 +45,9 @@ Capturas de la interfaz generadas a **1760 × 1280 píxeles**. Abre cada imagen 
     <th>Evolución InBody</th>
   </tr>
   <tr>
-    <td><a href="app/data/guide-pdf.webp"><img src="app/data/guide-pdf.webp" width="300" alt="Ejemplo de rutina importada y abierta en el editor"></a></td>
-    <td><a href="app/data/guide-load.webp"><img src="app/data/guide-load.webp" width="300" alt="Peso anterior como referencia y sugerencia cualitativa de subir la carga"></a></td>
-    <td><a href="app/data/guide-inbody.webp"><img src="app/data/guide-inbody.webp" width="300" alt="Mediciones corporales y gráfica de evolución con datos ficticios"></a></td>
+    <td><a href="https://raw.githubusercontent.com/miguelr1881/REAWAKEN/astra6_2/app/data/guide-pdf.webp"><img src="https://raw.githubusercontent.com/miguelr1881/REAWAKEN/astra6_2/app/data/guide-pdf.webp" width="300" alt="Ejemplo de rutina importada y abierta en el editor"></a></td>
+    <td><a href="https://raw.githubusercontent.com/miguelr1881/REAWAKEN/astra6_2/app/data/guide-load.webp"><img src="https://raw.githubusercontent.com/miguelr1881/REAWAKEN/astra6_2/app/data/guide-load.webp" width="300" alt="Peso anterior como referencia y sugerencia cualitativa de subir la carga"></a></td>
+    <td><a href="https://raw.githubusercontent.com/miguelr1881/REAWAKEN/astra6_2/app/data/guide-inbody.webp"><img src="https://raw.githubusercontent.com/miguelr1881/REAWAKEN/astra6_2/app/data/guide-inbody.webp" width="300" alt="Mediciones corporales y gráfica de evolución con datos ficticios"></a></td>
   </tr>
 </table>
 
