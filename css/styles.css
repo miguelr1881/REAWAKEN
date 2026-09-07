@@ -809,13 +809,16 @@ body.in-workout .rest-timer { bottom: calc(var(--safe-bottom) + 14px); }
 /* Solo el botón recibe taps: el toast completo taparía la barra de pestañas. */
 .toast.has-action { display: flex; align-items: center; gap: 16px; padding-right: 12px; }
 .toast-action {
-  pointer-events: auto;
+  pointer-events: none;
   flex: none;
   padding: 4px 8px; border-radius: 9px;
   color: var(--brand);
   font-size: 13.5px; font-weight: 800;
 }
 .toast-action:active { background: color-mix(in srgb, var(--brand) 18%, transparent); }
+.toast.show .toast-action, .toast.show .toast-close { pointer-events: auto; }
+.toast-close { flex: none; width: 44px; height: 44px; padding: 0; font-size: 24px; line-height: 1; color: var(--text-2); }
+.toast:has(.toast-close) { width: max-content; max-width: calc(100vw - 32px); gap: 8px; text-align: left; }
 
 /* ---------------- Editor de rutina ---------------- */
 

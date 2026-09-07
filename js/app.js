@@ -10,7 +10,7 @@ import { sessionDuration, trainingAchievements } from './progress.js';
 import { createTrainingUI } from './training-ui.js';
 import { assisted, machineAlternative, equipmentChoice, setRecord, comparisonKey } from './intelligence.js';
 
-const APP_VERSION = '2.8.1';
+const APP_VERSION = '2.8.2';
 
 /* ============================== Estado ============================== */
 
@@ -76,20 +76,36 @@ function fmtDuration(ms) {
 }
 
 /** `action` opcional: `{ label, fn }` pinta un botón dentro del toast (deshacer). */
-function toast(msg, action = null, duration = action ? 10000 : 6500) {
+function toast(msg, action = null, duration = action ? 10000 : 6500, dismissible = false) {
   const el = $('#toast');
+  const dismiss = () => {
+    clearTimeout(el._t);
+    el.inert = true;
+    el.classList.remove('show');
+    el.replaceChildren();
+  };
+  el.inert = false;
   el.textContent = msg;
   el.classList.toggle('has-action', !!action);
   if (action) {
     const btn = document.createElement('button');
     btn.className = 'toast-action';
     btn.textContent = action.label;
-    btn.onclick = () => { el.classList.remove('show'); clearTimeout(el._t); action.fn(); };
+    btn.onclick = () => { dismiss(); action.fn(); };
     el.append(btn);
+  }
+  if (dismissible) {
+    const close = document.createElement('button');
+    close.className = 'toast-close';
+    close.textContent = '×';
+    close.setAttribute('aria-label', 'Cerrar aviso');
+    close.title = 'Cerrar aviso';
+    close.onclick = dismiss;
+    el.append(close);
   }
   el.classList.add('show');
   clearTimeout(el._t);
-  el._t = setTimeout(() => el.classList.remove('show'), duration);
+  el._t = setTimeout(dismiss, duration);
 }
 
 function haptic() {
@@ -2104,11 +2120,17 @@ async function importBackup(file) {
 }
 
 async function checkBackupReminder() {
-  const finished = state.sessions.filter(s => s.finishedAt).length;
-  if (finished < 3) return;
-  const last = await db.getMeta('lastBackup');
-  const days = last ? (Date.now() - last) / 86400000 : Infinity;
-  if (days > 14) toast('Han pasado 2 semanas sin respaldo', { label: 'Respaldar', fn: exportBackup }, 15000);
+  const finished = state.sessions.filter(s => Number.isFinite(s.finishedAt));
+  if (finished.length < 3) return;
+  const [lastBackup, lastReminder] = await Promise.all([
+    db.getMeta('lastBackup'), db.getMeta('lastBackupReminder')
+  ]);
+  const baseline = Math.max(Number(lastBackup) || 0, Number(lastReminder) || 0,
+    Math.min(...finished.map(session => session.finishedAt)));
+  const now = Date.now();
+  if (now - baseline < 90 * 86400000) return;
+  await db.setMeta('lastBackupReminder', now);
+  toast('Respaldo pendiente', { label: 'Respaldar', fn: exportBackup }, 10000, true);
 }
 
 /* ---------- Sincronización ---------- */
