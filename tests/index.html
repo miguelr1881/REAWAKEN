@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>REAWAKEN - pruebas locales</title>
+<h1>Pruebas de inteligencia local</h1>
+<pre id="result">Ejecutando...</pre>
+<script type="module">
+  import { runIntelligenceTests } from './intelligence.test.js';
+  import { runProgressTests } from './progress.test.js';
+  import { runRoutineImportTests } from './routine-import.test.js';
+  const output = document.querySelector('#result');
+  try {
+    const intelligence = runIntelligenceTests(), progress = runProgressTests();
+    const routineImport = await runRoutineImportTests();
+    output.textContent = JSON.stringify({ checks: intelligence.checks + progress.checks + routineImport.checks, result: 'PASS', intelligence, progress, routineImport }, null, 2);
+    document.documentElement.dataset.result = 'pass';
+  } catch (error) {
+    output.textContent = error.stack;
+    document.documentElement.dataset.result = 'fail';
+  }
+</script>
+</html>

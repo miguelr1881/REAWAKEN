@@ -1,4 +1,4 @@
-const CACHE = 'reawaken-v13';
+const CACHE = 'reawaken-v20';
 const ASSETS = [
   './',
   './index.html',
@@ -6,15 +6,24 @@ const ASSETS = [
   './fonts/BarlowSemiCondensed-Bold.ttf',
   './js/app.js',
   './js/profile.js',
+  './js/progress.js',
+  './js/intelligence.js',
+  './js/training-ui.js',
   './js/exercise-info.js',
   './js/db.js',
   './js/routine.js',
   './js/routine-parser.js',
+  './js/routine-pdf.js',
+  './js/vendor/pdfjs/build/pdf.mjs',
+  './js/vendor/pdfjs/build/pdf.worker.mjs',
   './js/inbody.js',
   './js/sync.js',
   './data/seed-measures.json',
   './manifest.webmanifest',
   './icons/icon-180.png',
+  './icons/trophy.svg',
+  './icons/arrow-left-right.svg',
+  './icons/clipboard-check.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-maskable-512.png'
