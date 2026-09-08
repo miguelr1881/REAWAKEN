@@ -2,11 +2,16 @@ import { DEFAULT_ROUTINE, PROFILE, totalSets } from './routine.js';
 import { db, requestPersistence, storageEstimate } from './db.js';
 import { INBODY_FIELDS, parseInBody, formatValue, consistency, fieldMeta } from './inbody.js';
 import { parseRoutineText, sanitizeRoutine, DAY_ACCENTS } from './routine-parser.js';
+import { extractRoutinePdf } from './routine-pdf.js';
 import * as sync from './sync.js';
 import { MUSCLE_GROUPS, exerciseFocus, exerciseGroups, imageSearchUrl, muscleAtlas, dayFocus } from './exercise-info.js';
 import { normalizeProfile, validProfileDate, monthlyInBody } from './profile.js';
+import { sessionDuration, trainingAchievements } from './progress.js';
+import { enterView, resizeContent, disclose, bindDisclosures } from './motion.js';
+import { createTrainingUI } from './training-ui.js';
+import { assisted, machineAlternative, equipmentChoice, setRecord, comparisonKey } from './intelligence.js';
 
-const APP_VERSION = '2.4.0';
+const APP_VERSION = '2.8.9';
 
 /* ============================== Estado ============================== */
 
@@ -52,6 +57,13 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => (
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Date.now() + '-' + Math.random().toString(36).slice(2));
 
+const trainingUI = createTrainingUI({
+  state, dayFor: sessionDay, esc, openSheet, closeSheet, saveSession, startRest,
+  onSaveError: warnSessionSave,
+  redraw: () => { const scroll = window.scrollY; renderBlocks(sessionDay(state.session)); updateWorkoutHeader(); window.scrollTo(0, scroll); },
+  showSession: showSessionDetail
+});
+
 /* ============================== Utilidades ============================== */
 
 function fmtDate(ts, opts = { weekday: 'long', day: 'numeric', month: 'long' }) {
@@ -65,20 +77,36 @@ function fmtDuration(ms) {
 }
 
 /** `action` opcional: `{ label, fn }` pinta un botón dentro del toast (deshacer). */
-function toast(msg, action = null) {
+function toast(msg, action = null, duration = action ? 10000 : 6500, dismissible = false) {
   const el = $('#toast');
+  const dismiss = () => {
+    clearTimeout(el._t);
+    el.inert = true;
+    el.classList.remove('show');
+    el.replaceChildren();
+  };
+  el.inert = false;
   el.textContent = msg;
   el.classList.toggle('has-action', !!action);
   if (action) {
     const btn = document.createElement('button');
     btn.className = 'toast-action';
     btn.textContent = action.label;
-    btn.onclick = () => { el.classList.remove('show'); clearTimeout(el._t); action.fn(); };
+    btn.onclick = () => { dismiss(); action.fn(); };
     el.append(btn);
+  }
+  if (dismissible) {
+    const close = document.createElement('button');
+    close.className = 'toast-close';
+    close.textContent = '×';
+    close.setAttribute('aria-label', 'Cerrar aviso');
+    close.title = 'Cerrar aviso';
+    close.onclick = dismiss;
+    el.append(close);
   }
   el.classList.add('show');
   clearTimeout(el._t);
-  el._t = setTimeout(() => el.classList.remove('show'), action ? 5000 : 2600);
+  el._t = setTimeout(dismiss, duration);
 }
 
 function haptic() {
@@ -119,6 +147,7 @@ function newSession(dayId) {
   state.workoutScroll = 0;
   const day = dayById(dayId);
   const entries = {};
+  entries._cycle = { id: day.cycleId || 'legacy', name: day.cycleName || 'Historial sin ciclo' };
   for (const block of day.blocks) {
     for (const mv of block.movements) {
       entries[mv.id] = Array.from({ length: block.sets }, () => (mv.kind === 'weight' ? '' : false));
@@ -129,9 +158,13 @@ function newSession(dayId) {
 
 /** Mejor peso registrado en este ejercicio, para marcar récords. */
 function personalBest(movementId, excludeId) {
+  const movement = sessionDay(state.session)?.blocks.flatMap(block => block.movements).find(item => item.id === movementId);
+  if (!movement || assisted(movement) || machineAlternative(movement) || state.session.entries?._training) return null;
   let best = null;
   for (const s of state.sessions) {
-    if (!s.finishedAt || s.id === excludeId) continue;
+    if (!s.finishedAt || s.id === excludeId || s.entries?._training) continue;
+    const original = sessionDay(s)?.blocks.flatMap(block => block.movements).find(item => item.id === movementId);
+    if (original?.name !== movement.name || original?.reps !== movement.reps) continue;
     for (const v of s.entries?.[movementId] || []) {
       const n = parseFloat(v);
       if (Number.isFinite(n) && (best === null || n > best)) best = n;
@@ -178,6 +211,10 @@ function ensureEntries(session, day) {
 }
 
 let saveTimer = null;
+function warnSessionSave() {
+  toast('No se pudo guardar. Tus cambios siguen en pantalla; vuelve a intentarlo antes de cerrar la app.');
+}
+
 function saveSession(immediate = false) {
   if (!state.session) return;
   clearTimeout(saveTimer);
@@ -194,12 +231,22 @@ function saveSession(immediate = false) {
 
 /** Última sesión terminada que registró este movimiento, para mostrar referencia. */
 function lastPerformance(movementId, excludeId) {
+  const movement = sessionDay(state.session)?.blocks.flatMap(block => block.movements).find(item => item.id === movementId);
+  if (!movement) return null;
+  const choice = equipmentChoice(state.session, movement);
   const prev = state.sessions
     .filter(s => s.finishedAt && s.id !== excludeId && s.entries?.[movementId])
     .sort((a, b) => b.startedAt - a.startedAt);
   for (const s of prev) {
-    const vals = s.entries[movementId].filter(v => typeof v === 'string' && v.trim() !== '');
-    if (vals.length) return { values: vals, at: s.startedAt };
+    const original = sessionDay(s)?.blocks.flatMap(block => block.movements).find(item => item.id === movementId);
+    if (!original || original.name !== movement.name || original.reps !== movement.reps) continue;
+    const vals = s.entries[movementId].map((value, index) => {
+      if (typeof value !== 'string' || !recordedSet(value)) return null;
+      const record = setRecord(s, movementId, index);
+      const compatible = record ? comparisonKey(movement, choice) === comparisonKey(original, record) : !s.entries?._training && choice.variant === 'original' && choice.label === 'Habitual' && choice.unit === 'escala';
+      return compatible ? value : null;
+    });
+    if (vals.some(value => value !== null)) return { values: vals, at: s.startedAt };
   }
   return null;
 }
@@ -207,6 +254,7 @@ function lastPerformance(movementId, excludeId) {
 /* ============================== Vistas ============================== */
 
 function setView(name) {
+  const previousView = state.view;
   state.viewScroll[state.view] = window.scrollY;
   if (state.view === 'workout' && name !== 'workout') state.workoutScroll = window.scrollY;
   state.view = name;
@@ -218,6 +266,7 @@ function setView(name) {
   closeSheet();
   if (name !== 'workout') hideRest();
   window.scrollTo({ top: name === 'workout' ? state.workoutScroll || 0 : state.viewScroll[name] || 0 });
+  if (name !== previousView) enterView($(`#view-${name}`), 0);
 }
 
 /* ---------- Home ---------- */
@@ -231,6 +280,8 @@ function renderHome() {
   renderInBodyReminder();
 
   const finished = state.sessions.filter(s => s.finishedAt);
+  const unlocked = achievementState().badges.filter(badge => badge.unlocked).length;
+  $('#btn-achievements').setAttribute('aria-label', `Logros: ${unlocked} desbloqueados`);
   $('#stat-week').textContent = `${finished.filter(s => s.startedAt >= weekStart(Date.now())).length}/${state.profile.daysPerWeek}`;
   $('#stat-total').textContent = finished.length;
   $('#stat-streak').textContent = calcWeekStreak(finished);
@@ -286,10 +337,14 @@ function renderHome() {
       ? `Última vez <em>${fmtDate(last.startedAt, { day: 'numeric', month: 'short' })}</em>`
       : 'Sin registros';
     const count = finished.filter(s => s.dayId === day.id).length;
-    const pct = last ? sessionProgress(last).pct : 0;
+        const currentWeek = new Date(weekStart(Date.now()));
+        const nextWeek = new Date(currentWeek);
+        nextWeek.setDate(nextWeek.getDate() + 7);
+        const weeklyLast = finished.filter(session => session.dayId === day.id && session.startedAt >= currentWeek.getTime() && session.startedAt < nextWeek.getTime()).sort((first, second) => second.startedAt - first.startedAt)[0];
+        const pct = weeklyLast ? sessionProgress(weeklyLast).pct : 0;
     const circ = 2 * Math.PI * 16;
-    const ring = last ? `
-          <svg class="ring" width="42" height="42" viewBox="0 0 42 42">
+        const ring = weeklyLast ? `
+          <svg class="ring" width="42" height="42" viewBox="0 0 42 42" role="img" aria-label="Esta semana: ${pct}% completado">
             <circle class="bg" cx="21" cy="21" r="16"/>
             <circle class="fg" cx="21" cy="21" r="16" stroke-dasharray="${circ}" stroke-dashoffset="${circ * (1 - pct / 100)}"/>
           </svg>` : '';
@@ -399,9 +454,10 @@ function openWorkout(dayId) {
 
 function renderBlocks(day) {
   const s = state.session;
+  trainingUI.seedChoices(s, day);
   const focus = dayFocus(day);
   const unassigned = day.blocks.flatMap(block => block.movements).filter(movement => exerciseFocus(movement) === 'none').length;
-  $('#blocks').innerHTML = `<section class="workout-focus" aria-label="Enfoque orientativo de esta sesión"><div><span class="eyebrow">${esc(day.label)} · Enfoque</span><h2>${esc(day.subtitle || day.title)}</h2><p>${focus.map(group => MUSCLE_GROUPS[group]).join(' · ') || 'Sin grupos asignados'}${unassigned ? `<br><span class="focus-unassigned">${unassigned} sin clasificar</span>` : ''}</p></div><div class="workout-atlas">${muscleAtlas(focus)}</div></section>` + day.blocks.map(block => {
+  $('#blocks').innerHTML = `<section class="workout-focus" aria-label="Enfoque orientativo de esta sesión"><div><span class="eyebrow">${esc(day.label)} · Enfoque</span><h2>${esc(day.subtitle || day.title)}</h2><p>${focus.map(group => MUSCLE_GROUPS[group]).join(' · ') || 'Sin grupos asignados'}${unassigned ? `<br><span class="focus-unassigned">${unassigned} sin clasificar</span>` : ''}</p></div><div class="workout-atlas">${muscleAtlas(focus)}</div></section>` + day.blocks.map((block, blockIndex) => {
     const floorLabel = block.floor ? `Piso ${block.floor}` : (block.tag || 'Bloque');
     const floorClass = block.floor ? '' : ' neutral';
     const movesHtml = block.movements.map(mv => {
@@ -411,10 +467,11 @@ function renderBlocks(day) {
       const setsHtml = Array.from({ length: block.sets }, (_, i) => {
         if (mv.kind === 'weight') {
           const v = typeof vals[i] === 'string' ? vals[i] : '';
-          const ph = last?.values[i] ?? last?.values[0] ?? '–';
+          const ph = last?.values[i] ?? last?.values.find(value => value !== null) ?? '–';
           const isPr = best !== null && parseFloat(v) > best;
           return `<div class="set${v ? ' filled' : ''}${isPr ? ' pr' : ''}" data-mid="${mv.id}" data-idx="${i}" data-best="${best ?? ''}">
               <span class="n">${i + 1}</span>
+              ${trainingUI.repsInput(s, mv, i)}
               <input inputmode="decimal" enterkeyhint="done" autocomplete="off" value="${esc(v)}" placeholder="${esc(ph)}" aria-label="Serie ${i + 1} peso" />
             </div>`;
         }
@@ -440,14 +497,16 @@ function renderBlocks(day) {
               Cronometrar ${mv.timer} s
             </button>` : ''}
           ${mv.note ? `<div class="mv-note">${esc(mv.note)}</div>` : ''}
-          ${last ? `<div class="mv-last">Última vez: <b>${esc(last.values.join(' · '))}</b></div>` : ''}
+          ${last ? `<div class="mv-last">Última vez: <b>${esc(last.values.map(value => value ?? '–').join(' · '))}</b></div>` : ''}
           <div class="sets">${setsHtml}</div>
+          <div data-training-extra="${esc(mv.id)}">${trainingUI.extras(s, mv, block)}</div>
           ${mv.kind === 'weight' && (block.rest ?? state.restSeconds) > 0 ? `<button class="mv-rest" data-seconds="${block.rest ?? state.restSeconds}" aria-label="Descansar después de ${esc(mv.name)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="13" r="8"/><path d="M12 8v5l3 2M9 2h6"/></svg>Descansar ${block.rest ?? state.restSeconds} s</button>` : ''}
         </div>`;
     }).join('');
 
     return `
       <div class="block" data-block="${block.id}">
+        <div class="block-divider"><span class="block-number">${String(blockIndex + 1).padStart(2, '0')}</span><h2>${esc(block.tag || (block.movements.length > 1 ? `Grupo de ${block.movements.length} ejercicios` : 'Ejercicio individual'))}</h2><span class="block-status">Pendiente</span></div>
         <div class="block-head">
           <span class="floor${floorClass}">${esc(floorLabel)}</span>
           ${block.rest ? `<span class="floor neutral">Rest ${block.rest}s</span>` : ''}
@@ -459,6 +518,8 @@ function renderBlocks(day) {
   }).join('');
 
   bindSetHandlers(day);
+  $('#blocks .workout-focus').insertAdjacentHTML('afterend', trainingUI.workoutNote(day));
+  trainingUI.bind(day);
   day.blocks.forEach(b => updateBlockState(b));
 }
 
@@ -480,8 +541,10 @@ function bindSetHandlers(day) {
     };
   });
 
-  $$('#blocks .set input').forEach(input => {
+  $$('#blocks .set input:not([data-reps])').forEach(input => {
     const cell = input.closest('.set');
+    let wasRecorded = recordedSet(input.value);
+    input.addEventListener('focus', () => { wasRecorded = recordedSet(input.value); });
     input.addEventListener('input', () => {
       let v = input.value.replace(',', '.').replace(/[^0-9.]/g, '');
       const parts = v.split('.');
@@ -489,6 +552,8 @@ function bindSetHandlers(day) {
       if (v.length > 6) v = v.slice(0, 6);
       input.value = v;
       state.session.entries[cell.dataset.mid][+cell.dataset.idx] = v;
+      const movement = day.blocks.flatMap(block => block.movements).find(item => item.id === cell.dataset.mid);
+      trainingUI.updateInlineRecord(state.session, movement, +cell.dataset.idx, cell.querySelector('[data-reps]')?.value);
       cell.classList.toggle('filled', v.trim() !== '');
 
       const best = parseFloat(cell.dataset.best);
@@ -501,13 +566,15 @@ function bindSetHandlers(day) {
       updateBlockState(findBlock(day, cell.dataset.mid));
     });
     input.addEventListener('blur', () => {
-      saveSession(true);
+      saveSession(true)?.catch(warnSessionSave);
+      if (!wasRecorded && recordedSet(input.value)) startRest(currentRestFor(day, cell.dataset.mid));
+      wasRecorded = recordedSet(input.value);
+      trainingUI.refreshAdvice(day, cell.dataset.mid);
     });
     input.addEventListener('keydown', event => {
       if (event.key !== 'Enter' || !recordedSet(input.value)) return;
       event.preventDefault();
       input.blur();
-      startRest(currentRestFor(day, cell.dataset.mid));
     });
   });
 
@@ -543,6 +610,8 @@ function updateBlockState(block) {
     (state.session.entries[mv.id] || []).slice(0, block.sets).every(recordedSet)
   );
   el.classList.toggle('complete', complete);
+  const done = block.movements.reduce((sum, movement) => sum + (state.session.entries[movement.id] || []).slice(0, block.sets).filter(recordedSet).length, 0);
+  el.querySelector('.block-status').textContent = complete ? 'Completado' : `${done}/${block.sets * block.movements.length} series`;
 }
 
 function updateWorkoutHeader() {
@@ -635,6 +704,7 @@ function startCountdown(seconds, title, doneMsg, soundOnComplete = false) {
   $('#rt-toggle').disabled = false;
   $('#rest-timer').inert = false;
   $('#rest-timer').classList.add('show');
+  document.body.classList.add('timer-visible');
   paintRest();
   state.rest.id = setInterval(tickCountdown, 200);
 }
@@ -673,7 +743,8 @@ function startRest(seconds) {
 }
 
 function paintRest() {
-  $('#rt-num').textContent = Math.max(0, state.rest.left);
+  const seconds = Math.max(0, state.rest.left);
+  $('#rt-num').textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
   $('#rt-label').textContent = state.rest.paused ? 'En pausa' : state.rest.left > 0 ? `de ${state.rest.total} s` : '¡Listo!';
   $('#rt-toggle').setAttribute('aria-label', state.rest.paused ? 'Reanudar temporizador' : 'Pausar temporizador');
   $('#rt-toggle').setAttribute('title', state.rest.paused ? 'Reanudar' : 'Pausar');
@@ -689,6 +760,7 @@ function hideRest() {
   state.rest.running = false;
   state.rest.paused = false;
   $('#rest-timer').classList.remove('show');
+  document.body.classList.remove('timer-visible');
   $('#rest-timer').inert = true;
 }
 
@@ -737,7 +809,7 @@ function renderHistory() {
   const slot = $('#history-slot');
   const calendar = historyState.mode === 'calendar';
   const period = calendar ? finished.filter(session => dateKey(session.startedAt).slice(0, 7) === dateKey(historyState.month).slice(0, 7)) : finished;
-  const minutes = Math.round(period.reduce((total, session) => total + Math.max(0, session.finishedAt - session.startedAt), 0) / 60000);
+  const minutes = Math.round(period.reduce((total, session) => total + sessionDuration(session), 0) / 60000);
   const summary = `<div class="history-totals" aria-label="${calendar ? 'Resumen del mes' : 'Resumen completo'}"><div><strong>${period.length}</strong><span>Sesiones${calendar ? ' del mes' : ''}</span></div><div><strong>${new Set(period.map(session => dateKey(session.startedAt))).size}</strong><span>Días activos</span></div><div><strong>${minutes}</strong><span>Minutos</span></div></div>`;
   const visible = calendar ? finished.filter(session => dateKey(session.startedAt) === historyState.selected) : finished;
   slot.innerHTML = `${summary}<div class="history-switch seg" role="group" aria-label="Vista del historial"><button data-history-mode="calendar" class="${calendar ? 'on' : ''}" aria-pressed="${calendar}">Calendario</button><button data-history-mode="list" class="${calendar ? '' : 'on'}" aria-pressed="${!calendar}">Todas las sesiones</button></div>
@@ -746,7 +818,7 @@ function renderHistory() {
     <div aria-labelledby="history-date-title">${visible.length ? `<div class="list-card">${visible.map(s => {
     const day = sessionDay(s);
     const p = sessionProgress(s);
-    const dur = s.finishedAt ? fmtDuration(s.finishedAt - s.startedAt) : '';
+    const dur = s.finishedAt ? fmtDuration(sessionDuration(s)) : '';
     return `
       <button class="history-item" data-session="${esc(s.id)}" style="width:100%;background:none">
         <span class="history-stamp" aria-hidden="true"><b>${new Date(s.startedAt).getDate()}</b><small>${esc(fmtDate(s.startedAt, { month: 'short' }))}</small></span>
@@ -821,7 +893,8 @@ function showSessionDetail(id) {
     const sets = Array.from({ length: Math.max(block.sets, vals.length) }, (_, setIndex) => {
       const value = vals[setIndex];
       const done = recordedSet(value);
-      return `<div class="session-set${done ? ' done' : ''}"><small>Serie ${setIndex + 1}</small><b>${mv.kind === 'weight' ? done ? esc(value) : '—' : done ? '✓' : '—'}</b><span>${done ? 'Registrada' : 'Sin registrar'}</span></div>`;
+      const record = setRecord(s, mv.id, setIndex);
+      return `<div class="session-set${done ? ' done' : ''}"><small>Serie ${setIndex + 1}</small><b>${mv.kind === 'weight' ? done ? esc(value) : '—' : done ? '✓' : '—'}</b><span>${record ? esc(trainingUI.recordText(record)) : done ? 'Registrada' : 'Sin registrar'}</span></div>`;
     }).join('');
     return `<div class="session-movement"><h4>${esc(mv.name)}</h4><p>${esc(mv.reps || '')}${mv.timer ? ` · ${mv.timer} s` : ''}</p>${mv.note ? `<p class="session-note">${esc(mv.note)}</p>` : ''}<div class="session-sets">${sets}</div></div>`;
   }).join('')}</section>`).join('');
@@ -829,7 +902,9 @@ function showSessionDetail(id) {
   openSheet(`
     <div class="grabber"></div>
     <h2>${esc(day?.title || 'Entrenamiento anterior')}</h2>
-    <p>${fmtDate(s.startedAt)} · ${fmtDuration(s.finishedAt - s.startedAt)}</p>
+    <p>${fmtDate(s.startedAt)} · ${fmtDuration(sessionDuration(s))}</p>
+    <button class="btn btn-ghost duration-edit" id="edit-duration">Editar duración</button>
+    <button class="btn btn-ghost" id="session-day-report">Balance de este día</button>
     ${!s.routineSnapshot ? '<p class="session-legacy">Esta sesión no conserva una copia original de su rutina. Los datos disponibles pueden no reflejar el plan de ese día.</p>' : ''}
     <div class="summary-grid">
       <div><b>${day ? p.done : Object.values(s.entries || {}).filter(Array.isArray).flat().filter(recordedSet).length}</b><span>Series</span></div>
@@ -843,6 +918,8 @@ function showSessionDetail(id) {
   `);
 
   $('#sheet-close').onclick = closeSheet;
+  $('#edit-duration').onclick = () => openDurationEditor(s, () => showSessionDetail(id));
+  $('#session-day-report').onclick = () => trainingUI.openProgress('day', s.startedAt);
   $('#sheet-delete').onclick = async () => {
     const confirmed = await confirmSheet({ title: 'Eliminar sesión', body: 'Se eliminará este entrenamiento. El cambio también se enviará a tus dispositivos al sincronizar.', confirm: 'Eliminar', cancel: 'Conservar', danger: true });
     if (!confirmed) return;
@@ -912,47 +989,24 @@ function openNotes() {
 /* ---------- Historial de un ejercicio ---------- */
 
 function openMovementHistory(movementId) {
-  const found = findMovement(movementId);
+  const activeDay = sessionDay(state.session);
+  const activeBlock = activeDay?.blocks.find(item => item.movements.some(movement => movement.id === movementId));
+  const found = activeBlock ? { movement: activeBlock.movements.find(item => item.id === movementId), block: activeBlock } : findMovement(movementId);
   if (!found) return;
-  const { movement, block } = found;
-  const weighted = movement.kind === 'weight';
-
+  const { movement } = found;
   const rows = state.sessions
     .filter(s => s.finishedAt && s.entries?.[movementId])
     .sort((a, b) => b.startedAt - a.startedAt)
-    .map(s => ({ at: s.startedAt, vals: s.entries[movementId] }))
-    .filter(r => r.vals.some(v => v === true || (typeof v === 'string' && v.trim() !== '')));
-
-  const nums = weighted
-    ? rows.flatMap(r => r.vals.map(v => parseFloat(v)).filter(Number.isFinite))
-    : [];
-  const best = nums.length ? Math.max(...nums) : null;
-
-  const body = rows.length
-    ? rows.map(r => {
-        const txt = weighted
-          ? r.vals.map(v => (typeof v === 'string' && v.trim() ? v : '–')).join('  ·  ')
-          : `${r.vals.filter(v => v === true).length}/${r.vals.length} completadas`;
-        return `<div style="display:flex;gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid var(--stroke)">
-            <span style="flex:none;width:78px;font-size:12.5px;color:var(--text-2);text-transform:capitalize">${fmtDate(r.at, { day: 'numeric', month: 'short' })}</span>
-            <span style="flex:1;font-size:15px;font-weight:700;font-variant-numeric:tabular-nums">${esc(txt)}</span>
-          </div>`;
-      }).join('')
-    : '<p style="color:var(--text-3);font-size:13.5px;padding:14px 0">Todavía no has registrado este ejercicio.</p>';
-
-  openSheet(`
-    <div class="grabber"></div>
-    <h2>${esc(movement.name)}</h2>
-    <p>${esc(movement.reps)} · ${block.sets} ${block.sets === 1 ? 'serie' : 'series'}${movement.note ? ` · ${esc(movement.note)}` : ''}</p>
-    ${best !== null ? `<div class="summary-grid">
-        <div><b>${best}</b><span>Máximo</span></div>
-        <div><b>${rows.length}</b><span>Sesiones</span></div>
-        <div><b>${esc(String(rows[0]?.vals.filter(v => typeof v === 'string' && v.trim()).at(-1) ?? '—'))}</b><span>Último</span></div>
-      </div>` : ''}
-    <div style="margin-bottom:16px">${body}</div>
-    <button class="btn btn-ghost" id="mh-close">Cerrar</button>
-  `);
-  $('#mh-close').onclick = closeSheet;
+    .map(session => ({ session, movement: sessionDay(session)?.blocks.flatMap(item => item.movements).find(item => item.id === movementId && item.name === movement.name) }))
+    .filter(row => row.movement)
+    .map(row => ({ ...row, sets: row.session.entries[movementId].flatMap((value, index) => recordedSet(value) ? [{ value, index, record: setRecord(row.session, movementId, index) }] : []) }))
+    .filter(row => row.sets.length);
+  openSheet(`<span class="eyebrow">Historial del ejercicio</span><h2>${esc(movement.name)}</h2>
+    <p class="movement-history-count">${plural(rows.length, 'sesión', 'sesiones')}</p>
+    <div class="movement-history">${rows.length ? rows.map(row => `<section class="movement-history-row">
+      <header><h3>${fmtDate(row.session.startedAt, { day: 'numeric', month: 'short', year: 'numeric' })}</h3><span>${esc(row.movement.reps)} · ${plural(row.sets.length, 'serie', 'series')}</span></header>
+      <div class="movement-history-sets">${row.sets.map(item => `<div class="movement-history-set"><span class="history-set-number">${item.index + 1}</span><strong>${row.movement.kind === 'weight' ? esc(item.value) : 'Hecha'}${item.record?.unit && item.record.unit !== 'escala' ? `<small>${esc(item.record.unit)}</small>` : ''}</strong><span>${item.record?.reps != null ? `${esc(item.record.reps)} reps` : esc(row.movement.reps)}</span>${item.record?.label && item.record.variant !== 'original' ? `<small class="history-set-equipment">${esc(item.record.label)}</small>` : ''}</div>`).join('')}</div>
+    </section>`).join('') : '<p class="movement-history-empty">Aún no has registrado este ejercicio.</p>'}</div>`);
 }
 
 /* ---------- Rutina: carga, importación y editor ---------- */
@@ -971,9 +1025,12 @@ async function loadRoutine() {
   }
 }
 
-async function saveRoutine(days, name) {
+async function saveRoutine(days, name, newCycle = false) {
   const clean = sanitizeRoutine(days);
   if (!clean.length) throw new Error('La rutina quedó vacía');
+  const oldCycle = state.routine[0]?.cycleId || 'legacy';
+  const cycle = newCycle ? { cycleId: uid(), cycleName: `Rutina · ${fmtDate(Date.now(), { day: 'numeric', month: 'short', year: 'numeric' })}`, cycleStartedAt: Date.now() } : { cycleId: state.routine[0]?.cycleId, cycleName: state.routine[0]?.cycleName, cycleStartedAt: state.routine[0]?.cycleStartedAt };
+  clean.forEach(day => Object.assign(day, cycle));
   await saveSession(true);
   for (const session of state.sessions) {
     const original = dayById(session.dayId);
@@ -983,37 +1040,70 @@ async function saveRoutine(days, name) {
     }
   }
   const saved = (await db.allRoutines()).find(r => r.id === ROUTINE_ID);
+  if (newCycle) await db.putRoutine({ id: `cycle-${oldCycle === 'legacy' ? uid() : oldCycle}`, name: state.routine[0]?.cycleName || 'Historial sin ciclo', days: structuredClone(state.routine), active: false });
   await db.putRoutine({ id: ROUTINE_ID, name: name || 'Mi rutina', days: clean, active: true, ...(saved?.profile ? { profile: saved.profile } : {}) });
   state.routineUpdatedAt = Date.now();
   state.routine = clean;
   state.routineId = ROUTINE_ID;
+  return newCycle ? oldCycle : null;
 }
 
 function openImportRoutine() {
   openSheet(`
     <div class="grabber"></div>
     <h2>Importar rutina</h2>
-    <ol class="steps">
-      <li>Copia el texto del plan que te dio el coach (PDF, foto con Live Text o WhatsApp).</li>
-      <li>Pégalo aquí abajo tal cual, sin acomodarlo.</li>
-      <li>Lo interpreto y lo revisas en el editor antes de guardar.</li>
-    </ol>
+    <button class="btn btn-primary" id="btn-routine-pdf"><img class="trophy-icon" src="icons/clipboard-check.svg" alt="" width="20" height="20">Cargar PDF</button>
+    <input id="routine-pdf-file" type="file" accept="application/pdf,.pdf" hidden>
+    <p id="routine-import-status" role="status">PDF con texto · Hasta 20 MB. Se revisa antes de guardar.</p>
+    <label for="routine-paste">O pega el texto de tu rutina</label>
     <textarea class="paste-area" id="routine-paste" placeholder="Piso: DIA 1 Fuerza y potencia (tren inferior)&#10;1  Sentadilla en Smith  4  5 a 6&#10;2  Prensa + Goblet  3  8+12+15_7"></textarea>
-    <button class="btn btn-primary" id="btn-parse-routine">Interpretar rutina</button>
+    <button class="btn btn-ghost" id="btn-parse-routine">Interpretar texto</button>
     <button class="btn btn-ghost" id="btn-cancel-routine">Cancelar</button>
   `);
+  const token = sheetToken;
+  const controller = new AbortController();
+  sheetDismiss = () => controller.abort();
   $('#btn-cancel-routine').onclick = closeSheet;
-  $('#btn-parse-routine').onclick = () => {
+  const review = (extraWarnings = []) => {
     const { days, warnings } = parseRoutineText($('#routine-paste').value);
-    if (!days.length) return toast('No pude reconocer ningún día. Revisa el texto.');
+    if (!days.length) {
+      $('#routine-import-status').textContent = 'No se reconocieron días de rutina. Revisa el texto; los encabezados deben indicar Día 1, Día 2…';
+      return;
+    }
     closeSheet();
-    openEditor(days, warnings);
+    openEditor(days, [...extraWarnings, ...warnings]);
+    $('#ed-new-cycle').checked = true;
     edTouch();  // lo interpretado todavía no existe en disco: salir sin guardar debe avisar
     toast(`${days.length} días interpretados · revísalos`);
+  };
+  $('#btn-parse-routine').onclick = () => review();
+  $('#btn-routine-pdf').onclick = () => $('#routine-pdf-file').click();
+  $('#routine-pdf-file').onchange = async event => {
+    const file = event.target.files[0];
+    if (!file) return;
+    const button = $('#btn-routine-pdf'), parse = $('#btn-parse-routine'), paste = $('#routine-paste');
+    button.disabled = parse.disabled = true;
+    paste.readOnly = true;
+    $('#routine-import-status').textContent = 'Leyendo PDF en este dispositivo…';
+    try {
+      const result = await extractRoutinePdf(file, { signal: controller.signal });
+      if (token !== sheetToken) return;
+      paste.value = result.text;
+      review([...result.warnings, ...(result.emptyPages.length ? [`Páginas sin texto: ${result.emptyPages.join(', ')}. Revisa si falta parte del plan.`] : [])]);
+    } catch (error) {
+      if (token === sheetToken && error.name !== 'AbortError') $('#routine-import-status').textContent = error.message || 'No se pudo leer el PDF. Prueba pegar su texto.';
+    } finally {
+      if (token === sheetToken) {
+        button.disabled = parse.disabled = false;
+        paste.readOnly = false;
+        event.target.value = '';
+      }
+    }
   };
 }
 
 function openEditor(days, warnings = []) {
+  $('#ed-new-cycle').checked = false;
   state.draft = JSON.parse(JSON.stringify(days));
   state.draftWarnings = warnings;
   state.edDay = 0;
@@ -1100,7 +1190,7 @@ function edMovementHtml(bi, mi, m, count) {
         <input class="ed-name" data-path="m.${p}.name" value="${esc(m.name)}" placeholder="Nombre del ejercicio" aria-label="Nombre del ejercicio ${mi + 1}" />
       </div>
       <div class="ed-mv-row">
-        <label class="ed-field ed-field-reps"><span>Reps</span>
+        <label class="ed-field ed-field-reps"><span>Reps del plan</span>
           <input data-path="m.${p}.reps" value="${esc(m.reps)}" placeholder="10" />
         </label>
         <div class="ed-seg" data-kind="${p}">
@@ -1295,7 +1385,7 @@ function bindEditor() {
       return;
     }
     if ((el = hit('data-note'))) {
-      const input = el.previousElementSibling;
+      const input = el.closest('.ed-mv').querySelector('.ed-note');
       el.classList.add('ed-hide');
       input.classList.remove('ed-hide');
       input.focus();
@@ -1762,30 +1852,146 @@ function openMeasureSheet(measure) {
 
 /* ---------- Terminar sesión ---------- */
 
+function achievementState() {
+  return trainingAchievements(state.sessions, session => {
+    if (sessionDay(session)) return sessionProgress(session);
+    return { done: Object.values(session.entries || {}).filter(Array.isArray).flat().filter(recordedSet).length, total: 0 };
+  }, state.profile.daysPerWeek);
+}
+
+function openFunctions() {
+  const topics = [
+    ['Rutina desde PDF', 'Del documento a un plan editable', 'Carga el PDF de tu coach: la app extrae los días, ejercicios, series y reps en este dispositivo. Revisa los avisos y corrige el resultado antes de guardar. Un nuevo ciclo separa el balance del plan anterior sin cambiar tus sesiones pasadas.', 'Necesita un PDF con texto; para un escaneo usa Live Text y pega el contenido. No interpreta todos los diseños ni sustituye la revisión.', 'guide-pdf.png'],
+    ['Sugerencias de carga', 'Subir, mantener o bajar; sin cifras', 'Puede sugerir subir tras tres entrenamientos completos en días distintos, con todas las series en las reps altas del plan y la misma carga registrada. Busca en las últimas seis semanas y exige un registro en las últimas dos. Si la última serie quedó por debajo del objetivo, sugiere bajar; en ejercicios asistidos habla de más o menos ayuda.', 'No convierte kg y lb ni cambia el peso anterior del campo. Comprueba que sigues usando el mismo equipo y unidad: no puede detectar un cambio que no quedó registrado. Las reps precargadas no demuestran facilidad; sube solo si mantienes una técnica cómoda.', 'guide-load.png'],
+    ['Muscle Battery', 'La carga reciente de cada grupo muscular', 'En Tu balance, Muscle Battery reúne las series de fuerza de tus sesiones finalizadas durante los últimos 14 días. Distribuye el trabajo entre músculos principales y secundarios y reduce su peso con el tiempo. Muestra tres estados: carga reciente elevada, recuperación en curso o menor carga reciente.', 'Es una estimación, no una batería real ni permiso para volver a entrenar. No conoce tu sueño, alimentación, dolor o fatiga; sin registros suficientes no puede valorar una zona. El registro sencillo no mide esfuerzo.', null],
+    ['Lo que noté', 'Cambios sostenidos, con su historial detrás', 'En Tu balance aparecen observaciones cuando la primera serie de un ejercicio reúne seis sesiones comparables en seis días distintos, a lo largo de al menos dos semanas. Compara las tres anteriores con las tres recientes y busca un cambio de carga de al menos un 5%, sin solapamiento entre grupos. Puedes abrir las sesiones que sustentan cada observación.', 'Separa equipo, unidad, reps y su origen: precargadas o ajustadas. No analiza ejercicios asistidos ni demuestra que ganaste o perdiste fuerza. Puede no mostrar nada si falta historial o no hay un cambio claro; no inventa una conclusión.', null],
+    ['Tu balance', 'Tu entrenamiento por día, semana, mes o ciclo', 'Reúne sesiones, tiempo registrado, series realizadas y participación muscular del periodo. También muestra las reps que ajustaste frente al plan. Si esos ajustes se repiten, puede sugerir revisar el objetivo con tu coach.', 'El cumplimiento cuenta series registradas, no mide técnica ni intensidad. Dejar las reps precargadas no activa la revisión semanal; la app no cambia el plan automáticamente.', null],
+    ['Mapa muscular', 'Los músculos de cada ejercicio', 'La ficha del ejercicio señala las zonas principales y secundarias y ofrece un enlace a Google Imágenes. El mapa de cada día reúne los grupos musculares de tu rutina para mostrar su enfoque.', 'Es orientativo: la técnica y la variante influyen. Identificar los músculos de un ejercicio no indica si están recuperados ni sustituye una valoración profesional.', null],
+    ['Evolución InBody', 'Mediciones que puedes comparar', 'Pega el texto de tu hoja InBody para revisar y guardar sus mediciones. Stats reúne peso, músculo, grasa y puntuación, y dibuja su evolución entre fechas. Puedes comprobar el resumen antes de confirmar los datos.', 'La lectura depende del texto disponible y puede necesitar correcciones. Las tendencias reflejan mediciones, no resultados atribuibles a una sola sesión.', 'guide-inbody.png'],
+    ['Trofeos y etapas', 'Tu colección crece contigo', 'Ocho etapas reúnen tus insignias de entrenamiento. Cuatro medallas de una etapa abren la siguiente. Cada insignia guarda su requisito y tu avance; al terminar una sesión aparecen los nuevos logros que ganaste.', 'Se calculan desde tu historial: no necesitas registrar marcas máximas ni entrenar todos los días. Si eliminas sesiones, el progreso se recalcula.', null]
+  ];
+  openSheet(`<h2>Funciones especiales</h2><div class="functions-guide">${topics.map(([title, subtitle, description, limitation, image]) => `<details><summary><span>${esc(title)}<small>${esc(subtitle)}</small></span></summary>${image ? `<figure class="function-example"><img src="data/${image}" width="440" height="320" loading="lazy" alt="Ejemplo de ${esc(title)} con datos ficticios"><figcaption>Ejemplo · Datos ficticios</figcaption></figure>` : ''}<p>${esc(description)}</p><p class="function-limit">${esc(limitation)}</p></details>`).join('')}</div>`);
+}
+
+function openAchievements() {
+  const { stages, current } = achievementState();
+  const categories = ['Sesiones', 'Días', 'Series', 'Planes', 'Semanas', 'Constancia'];
+  openSheet(`<div class="trophy-room"><div class="trophy-room-heading"><h2>Trofeos</h2><span class="eyebrow">Etapa ${current.index + 1} · ${esc(current.title)}</span></div>
+    <nav class="trophy-path" aria-label="Etapas de la colección">${stages.map(stage => `<button type="button" data-stage="${stage.index}" class="path-node${stage.completed ? ' cleared' : ''}${stage.available ? '' : ' locked'}" aria-label="${esc(stage.title)}: ${stage.completed ? 'superada' : stage.available ? 'actual' : 'bloqueada'}" aria-pressed="${stage.index === current.index}" ${stage.index === current.index ? 'aria-current="step"' : ''} title="${esc(stage.title)}"><span>${stage.index + 1}</span></button>`).join('')}</nav>
+    <div id="trophy-stage"></div></div>`);
+  const renderStage = index => {
+    const stage = stages[index];
+    const stageStatus = stage.completed ? 'Etapa superada' : stage.available ? `${stage.count} / 4 medallas para ${index === stages.length - 1 ? 'completar Legado' : 'avanzar'}` : `Se abre al superar ${stages[index - 1].title}`;
+    $('#trophy-stage').innerHTML = `<section class="trophy-world" data-rank="${index}">
+      <header class="trophy-world-header"><span class="eyebrow">${stage.available ? 'Colección' : 'Etapa bloqueada'} ${String(index + 1).padStart(2, '0')}</span><h3>${esc(stage.title)}</h3><div class="stage-gems" aria-hidden="true">${Array.from({ length: 4 }, (_, gem) => `<i class="${gem < stage.count ? 'earned' : ''}"></i>`).join('')}</div><p>${esc(stageStatus)}</p></header>
+      <div class="medal-grid">${stage.badges.map((badge, badgeIndex) => `<button type="button" class="medal${badge.unlocked ? ' earned' : ''}" data-badge="${badgeIndex}" aria-expanded="false" aria-controls="medal-detail" aria-label="${esc(badge.title)}: ${badge.unlocked ? 'conseguido' : stage.available ? 'pendiente' : 'bloqueado'}" style="--medal-order:${badgeIndex}"><span class="medal-art" data-medal="${badgeIndex}" aria-hidden="true"><img class="trophy-icon" src="icons/${badgeIndex === 3 ? 'clipboard-check' : 'trophy'}.svg" alt="" width="30" height="30"><b>${badge.target}</b>${badge.unlocked ? '<span class="medal-check">✓</span>' : ''}</span><strong>${esc(badge.title)}</strong><small>${categories[badgeIndex]}</small></button>`).join('')}</div>
+      <div id="medal-detail" class="medal-reveal" hidden></div></section>`;
+    $$('.path-node').forEach(button => button.setAttribute('aria-pressed', String(Number(button.dataset.stage) === index)));
+    $$('.medal').forEach(button => {
+      button.onclick = () => {
+        const expanded = button.getAttribute('aria-expanded') === 'true';
+        $$('.medal').forEach(item => item.setAttribute('aria-expanded', 'false'));
+        const detail = $('#medal-detail');
+        if (expanded) {
+          disclose(detail, false);
+          return;
+        }
+        button.setAttribute('aria-expanded', 'true');
+        const badge = stage.badges[Number(button.dataset.badge)];
+        disclose(detail, true, () => {
+          detail.innerHTML = `<div class="medal-detail"><span class="eyebrow">${badge.unlocked ? 'Conseguido' : stage.available ? 'En progreso' : 'Bloqueado'}</span><h4>${esc(badge.title)}</h4><p>${esc(badge.description)}</p><div><progress value="${badge.value}" max="${badge.target}" aria-label="${esc(badge.title)}"></progress><b>${badge.value} / ${badge.target}</b></div>${!stage.available ? `<small>${esc(stageStatus)}</small>` : ''}</div>`;
+        }, () => {
+          if (button.getAttribute('aria-expanded') !== 'true' || !$('#sheet-backdrop').classList.contains('show')) return;
+          const sheet = $('#sheet');
+          const overflow = detail.getBoundingClientRect().bottom - sheet.getBoundingClientRect().bottom + 20;
+          if (overflow > 0) sheet.scrollBy({ top: overflow, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+        });
+        enterView(detail.firstElementChild);
+      };
+    });
+  };
+  $$('.path-node').forEach(button => {
+    button.onclick = () => {
+      if (button.getAttribute('aria-pressed') === 'true') return;
+      resizeContent($('#trophy-stage'), () => renderStage(Number(button.dataset.stage)));
+      enterView($('.trophy-world-header'));
+      button.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+    };
+  });
+  renderStage(current.index);
+  $('.path-node[aria-pressed="true"]').scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'instant' });
+}
+
+function openDurationEditor(session, onSaved) {
+  const totalMinutes = Math.min(1440, Math.max(1, Math.round(sessionDuration(session) / 60000)));
+  openSheet(`<h2>Duración del entrenamiento</h2><form id="duration-form"><div class="result-fields"><div class="field"><label for="duration-hours">Horas</label><input id="duration-hours" type="number" inputmode="numeric" min="0" max="24" step="1" required value="${Math.floor(totalMinutes / 60)}"></div><div class="field"><label for="duration-minutes">Minutos</label><input id="duration-minutes" type="number" inputmode="numeric" min="0" max="59" step="1" required value="${totalMinutes % 60}"></div></div><p id="duration-error" role="alert"></p><button class="btn btn-primary" type="submit">Guardar duración</button><button class="btn btn-ghost" id="duration-cancel" type="button">Cancelar</button></form>`);
+  $('#duration-cancel').onclick = onSaved;
+  $('#duration-form').onsubmit = async event => {
+    event.preventDefault();
+    const hoursInput = $('#duration-hours'), minutesInput = $('#duration-minutes');
+    const hours = Number(hoursInput.value), remainder = Number(minutesInput.value);
+    const minutes = hours * 60 + remainder;
+    if (!hoursInput.validity.valid || !minutesInput.validity.valid || !Number.isInteger(hours) || !Number.isInteger(remainder) || minutes < 1 || minutes > 1440) {
+      $('#duration-error').textContent = 'Introduce una duración entre 1 minuto y 24 horas.';
+      return;
+    }
+    const button = $('#duration-form [type="submit"]');
+    button.disabled = true;
+    const updated = { ...session, entries: { ...session.entries, _durationMinutes: minutes } };
+    try {
+      await db.putSession(updated);
+      Object.assign(session, updated);
+      state.sessions = state.sessions.map(item => item.id === session.id ? updated : item);
+      renderHistory();
+      onSaved();
+      sync.syncQuietly();
+    } catch {
+      button.disabled = false;
+      $('#duration-error').textContent = 'No se pudo guardar. Intenta de nuevo.';
+    }
+  };
+}
+
+function showWorkoutSummary(session, newlyUnlocked = [], celebrate = true) {
+  const day = sessionDay(session);
+  const progress = sessionProgress(session);
+  const previous = state.sessions.filter(item => item.id !== session.id && item.finishedAt && item.routineSnapshot && item.startedAt < session.startedAt && item.dayId === session.dayId && JSON.stringify(item.routineSnapshot) === JSON.stringify(day)).sort((first, second) => second.startedAt - first.startedAt)[0];
+  const change = previous ? progress.pct - sessionProgress(previous).pct : null;
+  const completedBlocks = day.blocks.filter(block => block.movements.every(movement => (session.entries[movement.id] || []).slice(0, block.sets).filter(recordedSet).length === block.sets)).length;
+  openSheet(`<span class="eyebrow">Sesión finalizada</span><h2>${esc(day.title)}</h2>
+    ${newlyUnlocked.length ? `<section class="trophy-celebration${celebrate ? ' celebrating' : ''}" role="status"><div class="trophy-confetti" aria-hidden="true">${Array.from({ length: 12 }, (_, index) => `<i style="--piece:${index}"></i>`).join('')}</div><img class="trophy-icon celebration-emblem" src="icons/trophy.svg" alt="" width="56" height="56"><span class="eyebrow">${newlyUnlocked.length === 1 ? 'Trofeo desbloqueado' : `${newlyUnlocked.length} trofeos desbloqueados`}</span><h3>${esc(newlyUnlocked[0].title)}</h3>${newlyUnlocked.length > 1 ? `<p>${newlyUnlocked.slice(1, 3).map(badge => esc(badge.title)).join(' · ')}</p>` : ''}${newlyUnlocked.length > 3 ? `<details><summary>Ver los otros ${newlyUnlocked.length - 3} trofeos</summary><p>${newlyUnlocked.slice(3).map(badge => esc(badge.title)).join(' · ')}</p></details>` : ''}</section>` : ''}
+    <div class="session-score"><div><span>Progress score</span><strong>${progress.pct}<small>/100</small></strong></div><div class="score-context"><b>${progress.pct === 100 ? 'Plan completado' : 'Trabajo registrado'}</b><span>${progress.done} de ${progress.total} series</span>${change !== null ? `<small>${change > 0 ? '+' : ''}${change} puntos vs. sesión anterior</small>` : ''}</div></div>
+    <div class="summary-grid"><div><b>${progress.done}</b><span>Series</span></div><div><b>${completedBlocks}/${day.blocks.length}</b><span>Bloques</span></div><div><b>${Math.round(sessionDuration(session) / 60000)}</b><span>Minutos</span></div></div>
+    <button class="btn btn-ghost duration-edit" id="summary-duration">Editar duración</button>
+    ${trainingUI.repChangesHtml([session])}
+    <button class="btn btn-primary" id="sheet-ok">Listo</button><button class="btn btn-ghost" id="summary-achievements">Ver logros</button><button class="btn btn-ghost" id="summary-progress">Balance de la semana</button>`);
+  $('#summary-duration').onclick = () => openDurationEditor(session, () => showWorkoutSummary(session, newlyUnlocked, false));
+  $('#summary-achievements').onclick = openAchievements;
+  $('#summary-progress').onclick = () => trainingUI.openProgress('week', session.startedAt);
+  $('#sheet-ok').onclick = () => { closeSheet(); checkBackupReminder(); };
+}
+
 async function finishWorkout() {
   if (!state.session || state.session.finishedAt) return;
   const s = state.session;
-  const day = sessionDay(s);
-  const p = sessionProgress(s);
+  const before = new Set(achievementState().badges.filter(badge => badge.unlocked).map(badge => badge.id));
+  $('#btn-finish').disabled = true;
   s.finishedAt = Date.now();
-  await saveSession(true);
+  try {
+    await saveSession(true);
+  } catch {
+    s.finishedAt = null;
+    toast('No se pudo finalizar. Tus series siguen abiertas; intenta de nuevo.');
+    return;
+  } finally {
+    $('#btn-finish').disabled = false;
+  }
+  hideRest();
   state.session = null;
   setView('home');
   renderHome();
   renderHistory();
-
-  openSheet(`
-    <div class="grabber"></div>
-    <h2>¡Entrenamiento cerrado!</h2>
-    <p>${esc(day.label)} · ${esc(day.title)}</p>
-    <div class="summary-grid">
-      <div><b>${p.done}</b><span>Series</span></div>
-      <div><b>${p.pct}%</b><span>Completado</span></div>
-      <div><b>${fmtDuration(s.finishedAt - s.startedAt).replace(' min', '′').replace(' h ', 'h')}</b><span>Duración</span></div>
-    </div>
-    <button class="btn btn-primary" id="sheet-ok">Perfecto</button>
-  `);
-  $('#sheet-ok').onclick = () => { closeSheet(); setView('home'); renderHome(); renderHistory(); checkBackupReminder(); };
+  showWorkoutSummary(s, achievementState().badges.filter(badge => badge.unlocked && !before.has(badge.id)));
   sync.syncQuietly();
 }
 
@@ -1797,6 +2003,8 @@ let sheetFocus = null;
 
 function openSheet(html) {
   sheetToken++;
+  const replacing = $('#sheet-backdrop').classList.contains('show');
+  const previousHeight = $('#sheet').getBoundingClientRect().height;
   if (!$('#sheet-backdrop').classList.contains('show')) sheetFocus = document.activeElement;
   $('#sheet').innerHTML = html;
   $('#sheet .grabber')?.remove();
@@ -1816,6 +2024,11 @@ function openSheet(html) {
   $('#rest-timer').inert = true;
   document.body.classList.add('sheet-open');
   $('#sheet').focus({ preventScroll: true });
+  if (replacing) {
+    const sheet = $('#sheet');
+    sheet.style.height = `${previousHeight}px`;
+    resizeContent(sheet, () => { sheet.style.height = ''; });
+  }
 }
 
 function closeSheet(accepted = false) {
@@ -1832,7 +2045,10 @@ function closeSheet(accepted = false) {
   if (sheetFocus?.isConnected) sheetFocus.focus({ preventScroll: true });
   // Se vacía al terminar la animación: si no, los botones siguen en el DOM fuera de pantalla.
   const token = ++sheetToken;
-  setTimeout(() => { if (token === sheetToken) $('#sheet').innerHTML = ''; }, 260);
+  const closingAnimations = $('#sheet').getAnimations();
+  Promise.allSettled(closingAnimations.map(animation => animation.finished)).then(() => {
+    if (token === sheetToken) $('#sheet').replaceChildren();
+  });
   const dismiss = sheetDismiss;
   sheetDismiss = null;
   dismiss?.(accepted === true);
@@ -1941,11 +2157,17 @@ async function importBackup(file) {
 }
 
 async function checkBackupReminder() {
-  const finished = state.sessions.filter(s => s.finishedAt).length;
-  if (finished < 3) return;
-  const last = await db.getMeta('lastBackup');
-  const days = last ? (Date.now() - last) / 86400000 : Infinity;
-  if (days > 14) toast('Han pasado 2 semanas sin respaldo · Ajustes → Exportar');
+  const finished = state.sessions.filter(s => Number.isFinite(s.finishedAt));
+  if (finished.length < 3) return;
+  const [lastBackup, lastReminder] = await Promise.all([
+    db.getMeta('lastBackup'), db.getMeta('lastBackupReminder')
+  ]);
+  const baseline = Math.max(Number(lastBackup) || 0, Number(lastReminder) || 0,
+    Math.min(...finished.map(session => session.finishedAt)));
+  const now = Date.now();
+  if (now - baseline < 90 * 86400000) return;
+  await db.setMeta('lastBackupReminder', now);
+  toast('Respaldo pendiente', { label: 'Respaldar', fn: exportBackup }, 10000, true);
 }
 
 /* ---------- Sincronización ---------- */
@@ -2234,6 +2456,9 @@ async function seedMeasures() {
 }
 
 function bindGlobal() {
+  $$('.open-training-progress').forEach(button => { button.onclick = () => trainingUI.openProgress('week', Date.now()); });
+  $('#btn-achievements').onclick = openAchievements;
+  $('#btn-functions').onclick = openFunctions;
   $('#settings-profile').onclick = () => openProfile();
   $('#btn-routine-date').onclick = () => openProfile(true);
   $('#btn-settings-inbody').onclick = openNewMeasure;
@@ -2268,6 +2493,7 @@ function bindGlobal() {
     resizeSheet();
   }
   $('#app-version').textContent = `REAWAKEN · ${APP_VERSION}`;
+  bindDisclosures(document);
   $('#btn-check-update').onclick = checkForUpdate;
   sync.onSyncChange(() => { if (state.view === 'settings') renderSync(); });
   window.addEventListener('online', () => { if (!state.session && !state.draft) sync.syncQuietly(); });
@@ -2350,12 +2576,13 @@ function bindGlobal() {
   $('#ed-save').onclick = async () => {
     if (!edValidate()) return;
     try {
-      await saveRoutine(state.draft, 'Mi rutina');
+      const endedCycle = await saveRoutine(state.draft, 'Mi rutina', $('#ed-new-cycle').checked);
       state.draft = null;
       state.edDirty = false;
       setView('home'); renderHome();
       sync.syncQuietly();
       toast('Rutina guardada');
+      if (endedCycle) trainingUI.openProgress('cycle', Date.now(), endedCycle);
     } catch (e) {
       toast(e.message);
     }

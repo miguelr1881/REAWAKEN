@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="es" data-build="2.4.0">
+<html lang="es" data-build="2.8.9">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -29,7 +29,7 @@
 <link rel="apple-touch-icon" href="icons/icon-180.png" />
 <link rel="icon" href="icons/icon-192.png" />
 <link rel="preload" href="fonts/BarlowSemiCondensed-Bold.ttf" as="font" type="font/ttf" crossorigin />
-<link rel="stylesheet" href="css/styles.css?v=2.4.0" />
+<link rel="stylesheet" href="css/styles.css?v=2.8.9" />
 </head>
 <body>
 
@@ -41,10 +41,11 @@
   <section class="view active" id="view-home">
     <div class="page">
       <div class="hero">
-        <div class="brand-line"><img src="icons/icon-192.png" width="28" height="28" alt="" /><span>REAWAKEN</span></div>
+        <div class="brand-line"><img src="icons/icon-192.png" width="28" height="28" alt="" /><span>REAWAKEN</span><button class="icon-btn achievements-button" id="btn-achievements" aria-label="Logros" title="Tus logros"><img class="trophy-icon" src="icons/trophy.svg" width="23" height="23" alt=""></button></div>
         <p class="greet" id="greeting">Hola, Miguel</p>
         <h1 class="title-xl">Tu entrenamiento</h1>
         <p class="date" id="today-date"></p>
+        <div id="inbody-reminder"></div>
         <div class="stats-row">
           <div class="stat"><b id="stat-week">0</b><span>Esta semana</span></div>
           <div class="stat"><b id="stat-total">0</b><span>Sesiones</span></div>
@@ -55,8 +56,8 @@
 
       <div id="resume-slot"></div>
       <div id="next-slot"></div>
+      <button class="open-training-progress progress-entry" id="home-progress"><span>Tu balance</span><small>Semana · Recuperación · Lo que noté</small><span aria-hidden="true">›</span></button>
       <div id="routine-alert"></div>
-      <div id="inbody-reminder"></div>
 
       <h2 class="section-title" id="routine-heading">Tu rutina</h2>
       <div class="day-list" id="day-list"></div>
@@ -105,6 +106,7 @@
     <div class="page">
       <header class="section-masthead"><div><span class="eyebrow">REAWAKEN</span><h1 class="title-xl">Stats</h1></div><span class="section-index" aria-hidden="true">02</span></header>
       <p class="date" id="body-sub">—</p>
+      <button class="open-training-progress progress-entry" id="stats-progress"><span>Progreso del entrenamiento</span><small>Semana · Mes · Ciclo</small><span aria-hidden="true">›</span></button>
       <div style="margin-top:20px" id="body-slot"></div>
       <button class="btn btn-ghost" id="btn-add-measure" style="margin-top:18px">+ Nueva medición InBody</button>
     </div>
@@ -137,6 +139,7 @@
       <div class="ed-tabs" id="ed-tabs" role="tablist"></div>
     </header>
     <div class="ed-body" id="ed-body"></div>
+    <label class="cycle-option"><input type="checkbox" id="ed-new-cycle">Iniciar nuevo ciclo con esta rutina</label>
   </section>
 
   <!-- ============ AJUSTES ============ -->
@@ -145,6 +148,11 @@
       <header class="section-masthead"><div><span class="eyebrow">REAWAKEN</span><h1 class="title-xl">Ajustes</h1></div><span class="section-index" aria-hidden="true">04</span></header>
       <button class="settings-profile" id="settings-profile" aria-label="Editar perfil" title="Editar perfil"></button>
       <div style="margin-top:20px" id="storage-notice"></div>
+
+      <h2 class="section-title">Funciones</h2>
+      <div class="list-card">
+        <button class="list-row" id="btn-functions"><span class="lr-body"><strong>Guía rápida</strong><small>Las funciones en pocas palabras</small></span><span aria-hidden="true">›</span></button>
+      </div>
 
       <h2 class="section-title">Apariencia</h2>
       <div class="list-card">
@@ -174,7 +182,7 @@
           <div class="lr-icon" style="background:color-mix(in srgb, #FF9F0A 22%, transparent);color:#FF9F0A">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16M4 12h16M4 19h10"/></svg>
           </div>
-          <div class="lr-body"><strong>Importar rutina nueva</strong><small>Pega el plan que te dé el coach</small></div>
+          <div class="lr-body"><strong>Importar rutina nueva</strong><small>Carga el PDF o pega el plan del coach</small></div>
           <svg class="chev" width="8" height="14" viewBox="0 0 8 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 1l6 6-6 6"/></svg>
         </button>
         <button class="list-row" id="btn-reset-routine">
@@ -230,7 +238,7 @@
         <button class="list-row" id="btn-test-audio"><span class="lr-body"><strong>Probar los tres tonos</strong><small>Volumen multimedia del dispositivo</small></span><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg></button>
       </div>
 
-      <div class="app-build"><span id="app-version">REAWAKEN · 2.4.0</span><button id="btn-check-update" class="btn btn-ghost">Buscar actualización</button><small id="update-status" role="status"></small></div>
+      <div class="app-build"><span id="app-version">REAWAKEN · 2.8.9</span><button id="btn-check-update" class="btn btn-ghost">Buscar actualización</button><small id="update-status" role="status"></small></div>
     </div>
   </section>
 
@@ -240,10 +248,10 @@
 <div class="rest-timer" id="rest-timer" inert>
   <div class="rt-ring">
     <svg width="46" height="46" viewBox="0 0 46 46">
-      <circle cx="23" cy="23" r="19" fill="none" stroke="rgba(255,255,255,0.14)" stroke-width="4"/>
+      <circle cx="23" cy="23" r="19" fill="none" stroke="var(--stroke-strong)" stroke-width="2"/>
       <circle id="rt-arc" cx="23" cy="23" r="19" fill="none" stroke="var(--day-accent,#0A84FF)" stroke-width="4" stroke-linecap="round" stroke-dasharray="119.4" stroke-dashoffset="0" transform="rotate(-90 23 23)"/>
     </svg>
-    <span id="rt-num">45</span>
+    <span id="rt-num" role="timer" aria-label="Tiempo restante">0:45</span>
   </div>
   <div class="rt-info"><strong id="rt-title">Descanso</strong><small id="rt-label">Toca para ajustar</small></div>
   <div class="rt-actions">

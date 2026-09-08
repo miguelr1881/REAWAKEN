@@ -69,16 +69,18 @@ const DURATION_RE = /(\d+\s*(?:a\s*\d+\s*)?m(?:in|i)?\b|\d+\s*s(?:eg)?\b)/i;
  * @returns {{ name: string, sets: number, reps: string }|null}
  */
 function matchTail(text) {
+  const duration = text.match(/^(.+?)\s+([1-9]|1[0-2])\s+(\d+\s*(?:min|mi|m|seg|s)(?:\s+abs)?)$/i);
+  if (duration) return { name: duration[1], sets: Number(duration[2]), reps: duration[3] };
   const tokens = text.replace(/\s*(rps|reps|rep)\b/gi, '').trim().split(/\s+/);
-  const isRep = (t) => REPS_TOKEN.test(t.replace(/[.,;]$/, ''));
+  const isRep = (t) => REPS_TOKEN.test(t.replace(/[.,;]$/, '')) || /^\d{1,2}[-–]\d{1,2}$/.test(t);
 
   for (let n = Math.min(4, tokens.length - 1); n >= 1; n--) {
     const suffix = tokens.slice(-n);
     if (!isRep(suffix[suffix.length - 1])) continue;
-    if (!suffix.every(t => isRep(t) || /^a$/i.test(t))) continue;
+    if (!suffix.every(t => isRep(t) || /^(?:a|[-–])$/i.test(t))) continue;
 
     const before = tokens[tokens.length - n - 1];
-    if (!/^[1-9]$/.test(before || '')) continue;
+    if (!/^(?:[1-9]|1[0-2])$/.test(before || '')) continue;
 
     return {
       name: tokens.slice(0, tokens.length - n - 1).join(' ').trim(),
@@ -131,12 +133,19 @@ function buildMovements(name, reps) {
   const parts = splitByPlus(name);
   const repParts = String(reps || '').split('_').map(r => r.trim()).filter(Boolean);
   return parts.map((part, i) => {
-    const { name: mvName, note } = splitNote(part);
+    const namedDuration = part.replace(/^(\d+\s*s)\s*[\[({]([^\])}]+)[\])}]\s*$/i, '$2 $1').replace(/^[\[({]([^\])}]+)[\])}]\s*(\d+\s*s)$/i, '$1 $2');
+    const { name: mvName, note } = splitNote(namedDuration);
+    const localDuration = namedDuration.match(/\b(\d+)\s*s\b/i);
+    const repsValue = parts.length === 1 && repParts.length > 1 ? reps : repParts[i] || (repParts.length === 1 ? repParts[0] : reps) || '—';
+    const movementReps = repParts.length === 1 && parts.length > 1 && /min|\babs\b/i.test(repsValue) && localDuration ? `${localDuration[1]}s` : repsValue;
+    const seconds = String(movementReps).match(/^(\d+)\s*s(?:eg)?$/i);
+    const timer = seconds && Number(seconds[1]) >= 1 && Number(seconds[1]) <= 7200 ? Number(seconds[1]) : undefined;
     return {
       id: nextId('m'),
       name: mvName,
-      reps: repParts[i] || (repParts.length === 1 ? repParts[0] : reps) || '—',
-      kind: guessKind(mvName),
+      reps: movementReps,
+      kind: timer ? 'check' : guessKind(mvName),
+      timer,
       note
     };
   }).filter(m => m.name);
@@ -244,6 +253,9 @@ export function sanitizeRoutine(days) {
     label: d.label || `Día ${di + 1}`,
     title: d.title || `Entrenamiento ${di + 1}`,
     subtitle: d.subtitle || '',
+    cycleId: typeof d.cycleId === 'string' ? d.cycleId.slice(0, 100) : undefined,
+    cycleName: typeof d.cycleName === 'string' ? d.cycleName.slice(0, 100) : undefined,
+    cycleStartedAt: Number.isFinite(d.cycleStartedAt) ? d.cycleStartedAt : undefined,
     accent: d.accent || DAY_ACCENTS[di % DAY_ACCENTS.length],
     blocks: (d.blocks || []).map((b, bi) => ({
       id: b.id || `${d.id || 'd'}${bi}`,

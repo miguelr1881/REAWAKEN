@@ -1,0 +1,149 @@
+import { repTarget, nextSetAdvice, comparisonKey, periodBounds, periodSummary, trainingInsights, recoveryEstimate, muscleContributions, setRecord, machineAlternative, repChanges, weeklyRepAdvice } from '../js/intelligence.js';
+import { sanitizeRoutine } from '../js/routine-parser.js';
+import { createTrainingUI } from '../js/training-ui.js';
+
+export function runIntelligenceTests() {
+  let checks = 0;
+  const assert = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  const now = Date.now();
+  const movement = { id: 'test-movement', name: 'Press de pecho en máquina', reps: '8-10', kind: 'weight' };
+  const choice = { variant: 'original', label: 'Máquina A', unit: 'kg', step: 2.5 };
+  const day = { id: 'test-day', blocks: [{ sets: 2, movements: [movement] }] };
+  const dayFor = session => session.routineSnapshot;
+  const make = (index, load = 50, reps = 10, rir = 2) => ({ id: `session-${index}`, dayId: day.id, startedAt: now - (30 - index * 4) * 86400000, finishedAt: now - (30 - index * 4) * 86400000 + 3600000, routineSnapshot: day, entries: { [movement.id]: [String(load), ''], _cycle: { id: 'cycle-a', name: 'A' }, _training: { version: 1, choices: { [movement.id]: { ...choice } }, sets: { [movement.id]: [{ ...choice, load, reps, rir }, null] } } } });
+  const history = Array.from({ length: 6 }, (_, index) => make(index, index < 3 ? 50 : 55));
+  const active = make(7, 50, 7, 0); active.finishedAt = null; active.startedAt = now;
+  assert(repTarget(movement).max === 10, 'coach range');
+  for (const reps of ['12+15+20', 'Al fallo', '20 s', '7+7+7', '0', '10-8']) assert(repTarget({ ...movement, reps }) === null, `special ${reps}`);
+  assert(repTarget({ ...movement, note: 'Bajando peso en cada tramo' }) === null, 'dropsets excluded');
+  assert(nextSetAdvice(active, movement, 1, history, dayFor).direction === 'decrease', 'suggest reducing without a numeric load');
+  assert(nextSetAdvice(active, { ...movement, name: 'Dominadas asistidas' }, 1, [], dayFor).text === 'Considera más asistencia', 'assistance increases when reducing difficulty');
+  active.entries._training.sets[movement.id][0].discomfort = true;
+  assert(nextSetAdvice(active, movement, 1, history, dayFor).load === undefined, 'no progression with discomfort');
+  delete active.entries._training.sets[movement.id][0].discomfort;
+  active.entries._training.choices[movement.id].label = 'Máquina B';
+  assert(nextSetAdvice(active, movement, 1, history, dayFor).load === undefined, 'different machine not copied');
+  active.entries._training.choices[movement.id] = { ...choice, step: 20 };
+  assert(nextSetAdvice(active, movement, 1, history, dayFor).load === undefined, 'large increment abstention');
+  active.entries._training.choices[movement.id] = { ...choice };
+  active.entries._training.sets[movement.id][0].reps = 10;
+  active.entries._training.sets[movement.id][0].rir = 3;
+  assert(nextSetAdvice(active, movement, 1, history, dayFor).direction === 'maintain', 'incomplete prior sessions do not support increasing');
+  assert(nextSetAdvice(active, movement, 1, [], dayFor).direction === 'maintain', 'no automatic rise from one easy set');
+  const consistent = [make(3), make(4), make(5)];
+  consistent.forEach(session => {
+    session.entries[movement.id] = ['50', '50'];
+    session.entries._training.sets[movement.id] = Array.from({ length: 2 }, () => ({ ...choice, load: 50, reps: 10, rir: null, repsSource: 'plan' }));
+  });
+  const freshAdvice = make(7); freshAdvice.startedAt = now; freshAdvice.finishedAt = null;
+  freshAdvice.entries[movement.id] = ['', '']; freshAdvice.entries._training.sets[movement.id] = [];
+  assert(nextSetAdvice(freshAdvice, movement, 0, consistent, dayFor).direction === 'increase', 'three complete consistent sessions support a qualitative increase without RIR');
+  assert(nextSetAdvice(freshAdvice, movement, 0, consistent, dayFor).load === undefined, 'increase never changes numeric prefill');
+  assert(nextSetAdvice(freshAdvice, movement, 0, consistent, dayFor).reason.includes('precargadas'), 'preset reps caveat visible');
+  assert(nextSetAdvice(freshAdvice, movement, 0, consistent.slice(1), dayFor).direction === 'maintain', 'two sessions insufficient');
+  const changedPlan = structuredClone(freshAdvice);
+  changedPlan.routineSnapshot.blocks[0].sets = 3;
+  assert(nextSetAdvice(changedPlan, movement, 0, consistent, dayFor).direction === 'maintain', 'changed set count does not support an increase');
+  for (const change of [
+    sessions => { sessions[2].entries._training.sets[movement.id][1].reps = 8; },
+    sessions => { sessions[2].entries[movement.id][1] = ''; },
+    sessions => { sessions[2].entries._training.sets[movement.id][1].unit = 'lb'; },
+    sessions => { sessions[2].entries._training.sets[movement.id][1].discomfort = true; },
+    sessions => { sessions[2].entries._cycle.id = 'other'; },
+    sessions => { sessions[2].startedAt = sessions[1].startedAt; },
+    sessions => { sessions.forEach(item => { item.startedAt -= 42 * 86400000; }); },
+    sessions => { sessions[2].entries[movement.id][0] = '55'; sessions[2].entries._training.sets[movement.id][0].load = 55; }
+  ]) {
+    const changed = structuredClone(consistent); change(changed);
+    assert(nextSetAdvice(freshAdvice, movement, 0, changed, dayFor).direction !== 'increase', 'inconsistent, mixed-unit, stale or same-day data prevents increase');
+  }
+  assert(comparisonKey(movement, choice) !== comparisonKey(movement, { ...choice, unit: 'lb' }), 'units isolated');
+  assert(trainingInsights(history, dayFor).length === 1, 'six comparable sessions create observation');
+  assert(trainingInsights(history.slice(0, 5), dayFor).length === 0, 'five sessions insufficient');
+  const inconsistent = structuredClone(history); inconsistent[5].entries[movement.id][0] = '50'; inconsistent[5].entries._training.sets[movement.id][0].load = 50;
+  assert(trainingInsights(inconsistent, dayFor).length === 0, 'overlapping change not robust');
+  const absentEffort = structuredClone(history); absentEffort.forEach(session => { session.entries._training.sets[movement.id][0].rir = null; });
+  assert(trainingInsights(absentEffort, dayFor).length === 0, 'missing effort not inferred');
+  const inlineHistory = structuredClone(absentEffort);
+  inlineHistory.forEach(session => { session.entries._training.sets[movement.id][0].repsSource = 'plan'; });
+  const inlineInsight = trainingInsights(inlineHistory, dayFor)[0];
+  assert(inlineInsight && !inlineInsight.effortKnown && inlineInsight.text.includes('precargadas del plan'), 'inline plan reps support explicitly labelled load observations');
+  assert(inlineInsight.detail.includes('no demuestra'), 'load observation does not claim strength or effort');
+  assert(trainingInsights(inlineHistory.slice(0, 5), dayFor).length === 0, 'inline observations still require six sessions');
+  const mixedSources = structuredClone(inlineHistory); mixedSources[0].entries._training.sets[movement.id][0].repsSource = 'edited';
+  assert(trainingInsights(mixedSources, dayFor).length === 0, 'preset and edited reps are not mixed for observations');
+  const onlyFinal = structuredClone(history); onlyFinal.forEach(session => { session.entries[movement.id].reverse(); session.entries._training.sets[movement.id].reverse(); });
+  assert(trainingInsights(onlyFinal, dayFor).length === 0, 'different series order not inferred');
+  const corrected = structuredClone(history[0]); corrected.entries[movement.id][0] = '42';
+  assert(setRecord(corrected, movement.id, 0) === null, 'stale metadata ignored after weight correction');
+  assert(recoveryEstimate([], dayFor).length === 0, 'no history means unknown');
+  assert(recoveryEstimate(history.map(session => ({ ...session, deletedAt: now })), dayFor).length === 0, 'deleted sessions excluded');
+  const recent = make(7); recent.startedAt = now - 3600000; recent.finishedAt = now;
+  const later = recoveryEstimate([recent], dayFor, now + 48 * 3600000);
+  assert(later[0].load < recoveryEstimate([recent], dayFor, now)[0].load, 'load decays with time');
+  assert(muscleContributions(movement).some(item => item.group === 'triceps' && item.share < 1), 'compound secondary contribution');
+  assert(machineAlternative({ name: 'Curl de piernas sentado' }).title.includes('sentado'), 'substitution preserves seated movement');
+  assert(machineAlternative({ name: 'Curl con mancuerna' }) === null, 'no machine alternative for free weight');
+  const summary = periodSummary([...history, { ...history[0], id: 'duplicate' }], dayFor, { start: 0, end: now });
+  assert(summary.sessions.length === 7 && summary.days === 6 && summary.done === 7, 'sessions and distinct days');
+  assert(periodSummary(history, dayFor, { start: 0, end: now }, 'other-cycle').sessions.length === 0, 'cycle isolation');
+  assert(summary.weeks.length > 1, 'weekly breakdown');
+  const february = periodBounds('month', new Date(2024, 1, 20).getTime());
+  assert(new Date(february.end).getDate() === 1 && new Date(february.end).getMonth() === 2, 'leap month');
+  const monday = periodBounds('week', new Date(2026, 8, 13, 23).getTime());
+  assert(new Date(monday.start).getDay() === 1 && new Date(monday.start).getDate() === 7, 'local Monday week');
+  const clean = sanitizeRoutine([{ ...day, cycleId: 'cycle-a', cycleName: 'A', cycleStartedAt: now }]);
+  assert(clean[0].cycleId === 'cycle-a' && clean[0].cycleStartedAt === now, 'cycle survives sanitizer');
+  assert(JSON.parse(JSON.stringify(history))[0].entries._training.sets[movement.id][0].reps === 10, 'JSON retains tracking');
+  const weekStart = periodBounds('week', now).start;
+  const repHistory = [make(0, 50, 7, null), make(1, 50, 7, null)];
+  repHistory.forEach((session, index) => {
+    session.startedAt = weekStart - (3 - index) * 86400000;
+    session.finishedAt = session.startedAt + 3600000;
+    session.entries._training.sets[movement.id][0].repsSource = 'edited';
+  });
+  assert(repChanges(repHistory, dayFor).length === 2, 'explicit rep changes appear in summaries');
+  assert(weeklyRepAdvice(active, movement, repHistory, dayFor, now)?.reps === 7, 'repeated edits last week suggest reviewing target');
+  assert(weeklyRepAdvice(active, movement, repHistory.slice(0, 1), dayFor, now) === null, 'one edit does not suggest weekly change');
+  const automatic = structuredClone(repHistory);
+  automatic.forEach(session => { session.entries._training.sets[movement.id][0].repsSource = 'plan'; });
+  assert(repChanges(automatic, dayFor).length === 0 && weeklyRepAdvice(active, movement, automatic, dayFor, now) === null, 'prefilled reps never trigger change suggestions');
+  const otherMachine = structuredClone(repHistory);
+  otherMachine.forEach(session => { session.entries._training.sets[movement.id][0].label = 'Other'; });
+  assert(weeklyRepAdvice(active, movement, otherMachine, dayFor, now) === null, 'weekly reps isolate equipment');
+  const otherCycle = structuredClone(repHistory);
+  otherCycle.forEach(session => { session.entries._cycle.id = 'other'; });
+  assert(weeklyRepAdvice(active, movement, otherCycle, dayFor, now) === null, 'weekly reps isolate cycles');
+  const sameDay = structuredClone(repHistory); sameDay[1].startedAt = sameDay[0].startedAt;
+  assert(weeklyRepAdvice(active, movement, sameDay, dayFor, now) === null, 'weekly reps require distinct days');
+  const oldWeek = structuredClone(repHistory); oldWeek.forEach(session => { session.startedAt -= 7 * 86400000; });
+  assert(weeklyRepAdvice(active, movement, oldWeek, dayFor, now) === null, 'stale edits do not trigger this week');
+  const onceWeekly = structuredClone(repHistory); onceWeekly[0].startedAt -= 7 * 86400000;
+  assert(weeklyRepAdvice(active, movement, onceWeekly, dayFor, now)?.reps === 7, 'once-weekly exercise edits can support a weekly suggestion');
+  const inline = createTrainingUI({ state: { sessions: [] }, dayFor, esc: value => String(value) });
+  const inlineSession = make(0); inlineSession.entries[movement.id][0] = '';
+  assert(inline.repsInput(inlineSession, movement, 0).includes('value="10"'), 'inline reps prefilled from coach');
+  inline.updateInlineRecord(inlineSession, movement, 0, '7');
+  assert(setRecord(inlineSession, movement.id, 0) === null, 'reps alone never complete a set');
+  inlineSession.entries[movement.id][0] = '50';
+  inline.updateInlineRecord(inlineSession, movement, 0, '10');
+  assert(setRecord(inlineSession, movement.id, 0).repsSource === 'plan', 'weight saves untouched plan reps without questions');
+  inline.updateInlineRecord(inlineSession, movement, 0, '7');
+  assert(repChanges([inlineSession], dayFor).length === 1, 'inline edit creates summary deviation');
+  inlineSession.entries[movement.id][0] = '55';
+  inline.updateInlineRecord(inlineSession, movement, 0, '7');
+  assert(setRecord(inlineSession, movement.id, 0).reps === 7, 'weight correction preserves inline reps');
+  inline.updateInlineRecord(inlineSession, movement, 0, '10');
+  assert(repChanges([inlineSession], dayFor).length === 0, 'returning to coach reps removes deviation');
+  const compound = { ...movement, name: 'Russian twist + press', reps: '8' };
+  assert(inline.repsInput(inlineSession, compound, 1).includes('value="8"') && repTarget(compound) === null, 'compound numeric reps editable without enabling load advice');
+  assert(inline.repsInput(inlineSession, { ...movement, reps: 'Al fallo' }, 0) === '', 'failure reps not fabricated');
+  const fresh = make(0); fresh.entries[movement.id] = ['', '']; fresh.entries._training.sets[movement.id] = [];
+  assert(!inline.extras(fresh, movement, day.blocks[0]).includes('next-advice'), 'no repetitive first-reference panels without history');
+  fresh.entries[movement.id][0] = '50';
+  inline.updateInlineRecord(fresh, movement, 0, '10');
+  assert(inline.extras(fresh, movement, day.blocks[0]).includes('Serie 2'), 'advice follows the next unrecorded weight');
+  fresh.entries[movement.id][1] = '50';
+  assert(!inline.extras(fresh, movement, day.blocks[0]).includes('next-advice'), 'legacy recorded weight does not appear as a pending set');
+  return { checks, result: 'PASS' };
+}
