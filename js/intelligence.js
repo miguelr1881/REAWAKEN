@@ -67,6 +67,14 @@ export function isComparableSetRecord(record) {
     typeof record.label === 'string' && record.label.trim() !== '');
 }
 
+function comparableMovementInDay(day, movement, choice) {
+  const key = comparisonKey(movement, choice);
+  const matches = (day?.blocks || []).flatMap(block => block.movements
+    .filter(original => repTarget(original) && comparisonKey(original, choice) === key)
+    .map(original => ({ block, movement: original })));
+  return matches.find(item => item.movement.id === movement.id) || (matches.length === 1 ? matches[0] : null);
+}
+
 export function personalBestForSet(session, movement, index, sessions, dayFor) {
   if (!repTarget(movement) || assisted(movement)) return null;
   const current = setRecord(session, movement.id, index);
@@ -76,10 +84,10 @@ export function personalBestForSet(session, movement, index, sessions, dayFor) {
   for (const previous of sessions) {
     if (previous.id === session.id || previous.deletedAt || !previous.finishedAt ||
         previous.startedAt >= session.startedAt || !previous.routineSnapshot) continue;
-    const original = dayFor(previous)?.blocks.flatMap(block => block.movements).find(item => item.id === movement.id);
-    if (!original || !repTarget(original)) continue;
-    for (let offset = 0; offset < (previous.entries?.[movement.id]?.length || 0); offset++) {
-      const record = setRecord(previous, movement.id, offset);
+    const original = comparableMovementInDay(dayFor(previous), movement, current)?.movement;
+    if (!original) continue;
+    for (let offset = 0; offset < (previous.entries?.[original.id]?.length || 0); offset++) {
+      const record = setRecord(previous, original.id, offset);
       if (!isComparableSetRecord(record) || record.reps !== current.reps || comparisonKey(original, record) !== key) continue;
       if (best === null || record.load > best) best = record.load;
     }
@@ -97,7 +105,7 @@ export function trackedSets(sessions, dayFor) {
       if (!repTarget(movement)) continue;
       for (let index = 0; index < block.sets; index++) {
         const record = setRecord(session, movement.id, index);
-        if (!record || record.discomfort || !Number.isInteger(record.reps) || record.reps < 1 || !Number.isFinite(record.load)) continue;
+        if (!isComparableSetRecord(record) || record.discomfort) continue;
         rows.push({ ...record, key: comparisonKey(movement, record), movement, session, index });
       }
     }
@@ -114,7 +122,7 @@ export function nextSetAdvice(session, movement, index, sessions, dayFor) {
   const current = (session.entries?._training?.sets?.[movement.id] || []).slice(0, index).map((_, offset) => setRecord(session, movement.id, offset)).filter(record => record && (Number.isInteger(record.reps) || record.discomfort) && comparisonKey(movement, record) === key);
   const last = current.at(-1) || prior[0];
   if (!last) return { text: 'Primera referencia', reason: 'Elige una carga cómoda para este equipo; no copiamos cargas de otras máquinas.' };
-  if (last.discomfort) return { text: 'Detén este ejercicio si hay dolor', reason: 'Sin recomendaciones de carga tras registrar molestia.' };
+  if (last.discomfort) return { code: 'discomfort', text: 'Detén este ejercicio si hay dolor', reason: 'Sin recomendaciones de carga tras registrar molestia.' };
   if (last.reps < target.min || last.rir === 0) return {
     direction: 'decrease', text: assisted(movement) ? 'Considera más asistencia' : 'Considera bajar la carga',
     reason: 'La última serie quedó por debajo de las reps previstas o sin margen. Prioriza la técnica.'
@@ -123,15 +131,15 @@ export function nextSetAdvice(session, movement, index, sessions, dayFor) {
   const recent = sessions.filter(item => !item.deletedAt && item.finishedAt && item.id !== session.id &&
     item.startedAt < session.startedAt && session.startedAt - item.startedAt <= 42 * 86400000 &&
     (item.entries?._cycle?.id || 'legacy') === cycle)
-    .map(item => ({ session: item, block: dayFor(item)?.blocks.find(block => block.movements.some(entry => entry.id === movement.id && comparisonKey(entry, choice) === key)) }))
+    .map(item => ({ session: item, ...comparableMovementInDay(dayFor(item), movement, choice) }))
     .filter(item => item.block)
     .sort((first, second) => second.session.startedAt - first.session.startedAt)
     .slice(0, 3);
   const consistent = recent.length === 3 && new Set(recent.map(item => localDay(item.session.startedAt))).size === 3 &&
     session.startedAt - recent[0].session.startedAt <= 14 * 86400000 &&
     recent.every(item => item.block.sets === recent[0].block.sets && Array.from({ length: item.block.sets }, (_, setIndex) => {
-      const record = setRecord(item.session, movement.id, setIndex);
-      return record && comparisonKey(movement, record) === key && !record.discomfort && record.rir !== 0 &&
+      const record = setRecord(item.session, item.movement.id, setIndex);
+      return record && comparisonKey(item.movement, record) === key && !record.discomfort && record.rir !== 0 &&
         Number.isInteger(record.reps) && record.reps >= target.max && record.load === last.load;
     }).every(Boolean));
   const currentBlock = dayFor(session)?.blocks.find(block => block.movements.some(item => item.id === movement.id));
@@ -255,34 +263,49 @@ export function weeklyRepAdvice(session, movement, sessions, dayFor, anchor = Da
   return { reps, days: new Set(edited.map(row => localDay(row.session.startedAt))).size, text: `En las semanas recientes registraste habitualmente ${reps} reps frente a ${movement.reps} del plan. Considera revisar ese objetivo con tu coach; el plan sigue igual.` };
 }
 
-export function trainingInsights(sessions, dayFor) {
+export function trainingInsights(sessions, dayFor, { includeRecent = false } = {}) {
   const buckets = new Map();
   for (const row of trackedSets(sessions, dayFor)) {
-    if (row.index !== 0 || row.load <= 0 || assisted(row.movement)) continue;
+    if (row.index !== 0 || row.load <= 0 || assisted(row.movement) || !row.session.routineSnapshot) continue;
     const basis = Number.isInteger(row.rir) ? `effort-${row.rir}` : ['plan', 'edited'].includes(row.repsSource) ? row.repsSource : null;
     if (!basis) continue;
-    const key = `${row.key}:${row.reps}:${basis}`;
+    const key = JSON.stringify([row.key, row.reps, basis, row.session.entries?._cycle?.id || 'legacy']);
     if (!buckets.has(key)) buckets.set(key, []);
     buckets.get(key).push(row);
   }
   const insights = [];
-  const used = new Set();
   for (const [key, rows] of buckets) {
-    const bySession = new Map();
-    for (const row of rows) if (!bySession.has(row.session.id) || row.index < bySession.get(row.session.id).index) bySession.set(row.session.id, row);
-    const sample = [...bySession.values()].sort((first, second) => first.session.startedAt - second.session.startedAt).slice(-6);
-    if (sample.length < 6 || new Set(sample.map(row => localDay(row.session.startedAt))).size < 6 || sample.at(-1).session.startedAt - sample[0].session.startedAt < 14 * 86400000) continue;
-    const before = median(sample.slice(0, 3).map(row => row.load));
-    const after = median(sample.slice(3).map(row => row.load));
-    const delta = (after / before - 1) * 100;
-    const separated = delta > 0 ? Math.min(...sample.slice(3).map(row => row.load)) > Math.max(...sample.slice(0, 3).map(row => row.load)) : Math.max(...sample.slice(3).map(row => row.load)) < Math.min(...sample.slice(0, 3).map(row => row.load));
+    const byDay = new Map();
+    for (const row of [...rows].sort((first, second) => first.session.startedAt - second.session.startedAt)) byDay.set(localDay(row.session.startedAt), row);
+    const recent = [...byDay.values()].slice(-6);
+    if (recent.length < 2) continue;
+    const enough = recent.length === 6 && recent.at(-1).session.startedAt - recent[0].session.startedAt >= 14 * 86400000;
+    const before = enough ? median(recent.slice(0, 3).map(row => row.load)) : null;
+    const after = enough ? median(recent.slice(3).map(row => row.load)) : null;
+    const delta = enough ? (after / before - 1) * 100 : 0;
+    const separated = enough && (delta > 0 ? Math.min(...recent.slice(3).map(row => row.load)) > Math.max(...recent.slice(0, 3).map(row => row.load)) : Math.max(...recent.slice(3).map(row => row.load)) < Math.min(...recent.slice(0, 3).map(row => row.load)));
+    const sustained = enough && Math.abs(delta) >= 5 && separated;
+    if (!sustained && !includeRecent) continue;
+    const stable = enough && recent.every(row => row.load === recent[0].load);
+    const sample = sustained || stable ? recent : recent.slice(-2);
     const latest = sample.at(-1);
-    if (Math.abs(delta) < 5 || !separated || used.has(latest.movement.name)) continue;
-    used.add(latest.movement.name);
     const effortKnown = Number.isInteger(latest.rir);
     const repsLabel = effortKnown ? `${latest.reps} reps y el mismo margen reportado` : `${latest.reps} reps ${latest.repsSource === 'plan' ? 'precargadas del plan' : 'ajustadas en el registro'}`;
     const effortDetail = effortKnown ? `${latest.rir === 3 ? '3+' : latest.rir} reps en reserva.` : 'Sin esfuerzo registrado: este cambio de carga no demuestra una mejora ni una pérdida de fuerza.';
-    insights.push({ id: key, title: latest.movement.name, text: `La carga mediana registrada pasó de ${before} a ${after}, con ${repsLabel}.`, detail: `${latest.label} · ${latest.unit} · ${effortDetail} Primera serie del ejercicio: tres sesiones anteriores frente a tres recientes. Observación, no prueba de causa ni medida de fuerza máxima.`, sample, effortKnown, direction: delta > 0 ? 'up' : 'down' });
+    const difference = sustained ? delta : latest.load - sample[0].load;
+    const text = sustained ? `La carga mediana registrada pasó de ${before} a ${after}, con ${repsLabel}.`
+      : stable ? `Registraste ${latest.load} con ${repsLabel} en las últimas seis sesiones comparables.`
+      : `Últimas dos sesiones: ${sample[0].load} → ${latest.load}, con ${repsLabel}.`;
+    const scope = sustained ? 'Primera serie del ejercicio: tres sesiones anteriores frente a tres recientes.'
+      : stable ? 'Primera serie, seis fechas distintas. Una carga constante no indica estancamiento ni un aumento de fuerza.'
+      : 'Comparación puntual de la primera serie, no una tendencia sostenida.';
+    insights.push({ id: key, title: latest.movement.name, text, detail: `${latest.label} · ${latest.unit} · ${effortDetail} ${scope} Observación, no prueba de causa ni medida de fuerza máxima.`, sample, effortKnown, kind: sustained ? 'trend' : stable ? 'stable' : 'recent', label: sustained ? 'Cambio sostenido' : stable ? 'Carga estable' : 'Comparación reciente', direction: difference > 0 ? 'up' : difference < 0 ? 'down' : 'stable' });
   }
-  return insights.slice(0, 3);
+  const used = new Set();
+  return insights.sort((first, second) => second.sample.at(-1).session.startedAt - first.sample.at(-1).session.startedAt || Number(second.kind === 'trend') - Number(first.kind === 'trend')).filter(insight => {
+    const name = normalizeExercise(insight.title);
+    if (used.has(name)) return false;
+    used.add(name);
+    return true;
+  }).slice(0, 3);
 }

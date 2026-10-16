@@ -21,18 +21,31 @@ export function correctSessionWeight(session, movementId, index, value) {
   return updated;
 }
 
+export function movementHistoryRows(movement, sessions, now = Date.now(), dayFor = session => session.routineSnapshot) {
+  const rows = [];
+  for (const session of sessions) {
+    if (!session.finishedAt || session.deletedAt || !Number.isFinite(session.startedAt) || session.startedAt > now) continue;
+    const matches = (dayFor(session)?.blocks || []).flatMap(block => block.movements)
+      .filter(item => item.kind === movement.kind && normalizeExercise(item.name) === normalizeExercise(movement.name));
+    const original = matches.find(item => item.id === movement.id) || (matches.length === 1 ? matches[0] : null);
+    if (!original) continue;
+    const values = session.entries?.[original.id];
+    if (!Array.isArray(values)) continue;
+    const sets = values.flatMap((value, index) => {
+      const recorded = value === true || (typeof value === 'string' && /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(value.trim()) && Number.isFinite(Number(value)));
+      return recorded ? [{ value, index, record: setRecord(session, original.id, index) }] : [];
+    });
+    if (sets.length) rows.push({ session, movement: original, sets });
+  }
+  return rows.sort((first, second) => second.session.startedAt - first.session.startedAt);
+}
+
 export function movementLoadHistory(movement, sessions, now = Date.now()) {
   if (!repTarget(movement) || assisted(movement)) return [];
   const groups = new Map();
-  for (const session of sessions) {
-    if (!session.finishedAt || session.deletedAt || !Number.isFinite(session.startedAt) || session.startedAt > now) continue;
-    const original = session.routineSnapshot?.blocks.flatMap(block => block.movements)
-      .find(item => item.id === movement.id && normalizeExercise(item.name) === normalizeExercise(movement.name));
-    if (!original || !repTarget(original) || assisted(original)) continue;
-    const values = session.entries?.[movement.id];
-    if (!Array.isArray(values)) continue;
-    for (let index = 0; index < values.length; index++) {
-      const record = setRecord(session, movement.id, index);
+  for (const { session, movement: original, sets } of movementHistoryRows(movement, sessions, now)) {
+    if (!repTarget(original) || assisted(original)) continue;
+    for (const { index, record } of sets) {
       if (!isComparableSetRecord(record)) continue;
       const key = JSON.stringify([comparisonKey(original, record), record.reps]);
       if (!groups.has(key)) groups.set(key, { key, record, prescription: original.reps, note: original.note || '', points: new Map() });

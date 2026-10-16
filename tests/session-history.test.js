@@ -1,4 +1,4 @@
-import { correctSessionWeight, movementLoadHistory } from '../js/session-history.js';
+import { correctSessionWeight, movementLoadHistory, movementHistoryRows } from '../js/session-history.js';
 import { nextSetAdvice, personalBestForSet, setRecord } from '../js/intelligence.js';
 import { prepareBackup } from '../js/backup.js';
 
@@ -64,6 +64,14 @@ export function runSessionHistoryTests() {
   assert(groups.length === 1 && groups[0].points.length === 3, 'Comparable scale history without known kg/lb');
   assert(groups[0].points.map(point => point.load).join() === '20,22,24', 'Chronological points');
   assert(JSON.stringify(history) === historyBefore, 'Read-only calculation');
+  const reimportedMovement = { ...movement, id: 'press-reimported' };
+  assert(movementLoadHistory(reimportedMovement, history, now)[0].points.length === 3, 'Unique matching exercise retains its curve after an ID change');
+  assert(movementHistoryRows(reimportedMovement, history, now).length === 3, 'History rows and curve share the reimported identity');
+  const ambiguous = structuredClone(history[0]);
+  ambiguous.routineSnapshot.blocks[0].movements.push({ ...movement, id: 'another-press' });
+  ambiguous.entries['another-press'] = ['100'];
+  assert(movementHistoryRows(reimportedMovement, [ambiguous], now).length === 0, 'Ambiguous duplicate names are not matched by guesswork');
+  assert(movementHistoryRows(movement, [ambiguous], now)[0].sets[0].value === '20', 'An exact ID keeps its own history without mixing duplicate names');
   const noted = structuredClone(history[0]);
   noted.routineSnapshot.blocks[0].movements[0].note = 'Agarre estrecho';
   assert(movementLoadHistory(movement, [noted], now)[0].note === 'Agarre estrecho', 'Comparison context remains visible');
@@ -98,6 +106,9 @@ export function runSessionHistoryTests() {
   assert(movementLoadHistory({ ...movement, name: 'Dominada asistida' }, history, now).length === 0, 'No assistance strength curve');
   assert(movementLoadHistory({ ...movement, kind: 'check' }, history, now).length === 0, 'No check strength curve');
   assert(movementLoadHistory(movement, [legacy], now).length === 0, 'Legacy values are not inferred');
+  const legacyRows = movementHistoryRows(movement, [legacy], now, () => day);
+  assert(legacyRows.length === 1 && legacyRows[0].sets[0].record === null, 'Explicit legacy display retains raw values without inventing comparison metadata');
+  assert(movementLoadHistory(movement, [legacy], now).length === 0, 'Legacy display does not enable a strength curve');
   const active = make('active', 0, 25); active.finishedAt = null;
   assert(personalBestForSet(active, movement, 0, [original], session => session.routineSnapshot) === 200, 'Original PR evidence');
   assert(personalBestForSet(active, movement, 0, [corrected], session => session.routineSnapshot) === 20.5, 'Corrected PR evidence');
