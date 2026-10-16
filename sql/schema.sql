@@ -1,8 +1,9 @@
 -- REAWAKEN · esquema para Supabase
--- Pégalo completo en el SQL Editor de tu proyecto y ejecútalo una sola vez.
+-- Referencia para un proyecto nuevo y vacío.
+-- No ejecutar sobre el proyecto compartido con Cris sin revisión, respaldo y autorización.
 
 create table if not exists public.sessions (
-  id          text primary key,
+  id          text not null,
   user_id     uuid not null references auth.users(id) on delete cascade,
   day_id      text not null,
   started_at  bigint not null,
@@ -10,26 +11,29 @@ create table if not exists public.sessions (
   entries     jsonb not null default '{}'::jsonb,
   notes       text,
   deleted_at  bigint,
-  updated_at  bigint not null
+  updated_at  bigint not null,
+  primary key (user_id, id)
 );
 
 create table if not exists public.measures (
-  id         text primary key,
+  id         text not null,
   user_id    uuid not null references auth.users(id) on delete cascade,
   at         bigint not null,
   values     jsonb not null default '{}'::jsonb,
   deleted_at bigint,
-  updated_at bigint not null
+  updated_at bigint not null,
+  primary key (user_id, id)
 );
 
 create table if not exists public.routines (
-  id         text primary key,
+  id         text not null,
   user_id    uuid not null references auth.users(id) on delete cascade,
   name       text not null,
   days       jsonb not null default '[]'::jsonb,
   profile    jsonb,
   active     boolean not null default false,
-  updated_at bigint not null
+  updated_at bigint not null,
+  primary key (user_id, id)
 );
 
 alter table public.routines add column if not exists profile jsonb;

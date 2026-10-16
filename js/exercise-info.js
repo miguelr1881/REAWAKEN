@@ -61,29 +61,46 @@ export function dayFocus(day) {
   return [...counts].sort((first, second) => second[1] - first[1]).map(([group]) => group);
 }
 
+let atlasSequence = 0;
+
 export function muscleAtlas(groups) {
   const active = new Set(Array.isArray(groups) ? groups : [groups]);
+  const id = `muscle-atlas-${++atlasSequence}`;
   const region = (group, path) => `<path data-region="${group}" class="anatomy-region${active.has(group) || active.has('full') ? ' active' : ''}" d="${path}"/>`;
-  const outline = '<circle cx="60" cy="22" r="12"/><path d="M51 36 49 43 31 49 22 78 15 110 22 115 34 86 39 72 41 112 34 142 38 180 42 211 34 222 51 222 55 181 60 148 65 181 69 222 86 222 78 211 82 180 86 142 79 112 81 72 86 86 98 115 105 110 98 78 89 49 71 43 69 36"/>';
-  return `<svg class="muscle-atlas" viewBox="0 0 260 250" role="img" aria-label="Mapa muscular esquemático, vista frontal y posterior">
-    <g transform="translate(5 0)"><g class="anatomy-outline">${outline}</g>
-      ${region('shoulders', 'M31 51 44 47 41 64 28 73Z M76 47 89 51 92 73 79 64Z')}
-      ${region('chest', 'M46 50 58 53 58 76 42 70Z M62 53 74 50 78 70 62 76Z')}
-      ${region('biceps', 'M28 77 38 70 33 92 23 99Z M82 70 92 77 97 99 87 92Z')}
-      ${region('core', 'M44 79 58 82 58 109 47 115Z M62 82 76 79 73 115 62 109Z')}
-      ${region('quads', 'M40 123 50 126 52 147 47 173 40 173 38 145Z M70 126 80 123 82 145 80 173 73 173 68 147Z')}
-      ${region('adductors', 'M52 120 59 124 57 151 53 161 54 143Z M61 124 68 120 66 143 67 161 63 151Z')}
-      ${region('calves', 'M41 180 50 180 48 205 44 205Z M70 180 79 180 76 205 72 205Z')}
-      <text x="60" y="245">Frente</text>
+  const pair = (group, path) => `${region(group, path)}<g transform="translate(116 0) scale(-1 1)">${region(group, path)}</g>`;
+  const outline = '<ellipse cx="58" cy="18" rx="11" ry="14"/><path d="M51 34C50 39 48 42 43 43L34 45C26 47 22 51 20 60L15 86 9 113C7 122 7 128 10 131C13 133 16 131 18 125L24 104 30 87 34 72C36 91 39 107 38 119L34 143C33 158 35 175 38 193L39 218C39 224 34 230 34 233L48 233C51 227 51 220 50 214L50 192 55 159 58 143 61 159 66 192 66 214C65 220 65 227 68 233L82 233C82 230 77 224 77 218L78 193C81 175 83 158 82 143L78 119C77 107 80 91 82 72L86 87 92 104 98 125C100 131 103 133 106 131C109 128 109 122 107 113L101 86 96 60C94 51 90 47 82 45L73 43C68 42 66 39 65 34C62 37 54 37 51 34Z"/>';
+  const shoulders = 'M33 46C27 47 23 52 22 61L20 70C25 67 30 66 34 63L38 46Z';
+  const calves = 'M39 192C42 190 46 191 49 194L46 214 41 216C39 207 38 199 39 192Z';
+  const labels = [...active].filter(group => Object.hasOwn(MUSCLE_GROUPS, group)).map(group => MUSCLE_GROUPS[group]).join(', ');
+  return `<svg class="muscle-atlas" viewBox="0 0 260 270" role="img" aria-label="Mapa muscular orientativo, frente y espalda${labels ? `. Zonas destacadas: ${labels}` : ''}" style="--atlas-body-fill:url(#${id}-body);--atlas-active-fill:url(#${id}-active)">
+    <defs>
+      <linearGradient id="${id}-body" x1="0" y1="0" x2="1" y2="1"><stop stop-color="var(--atlas-body-hi)"/><stop offset="1" stop-color="var(--atlas-body-low)"/></linearGradient>
+      <linearGradient id="${id}-active" x1="0" y1="0" x2="0.7" y2="1"><stop stop-color="var(--atlas-accent-hi)"/><stop offset="0.55" stop-color="var(--brand)"/><stop offset="1" stop-color="var(--atlas-accent-low)"/></linearGradient>
+    </defs>
+    <g transform="translate(7 4)">
+      <ellipse class="atlas-ground" cx="58" cy="240" rx="30" ry="3"/>
+      <g class="anatomy-outline">${outline}</g>
+      ${pair('shoulders', shoulders)}
+      ${pair('chest', 'M39 48C44 46 50 47 56 50L56 73C49 77 42 76 35 70L36 57Z')}
+      ${pair('biceps', 'M23 73C26 69 30 68 33 68L29 89C26 95 22 100 18 101L20 86Z')}
+      ${pair('core', 'M42 80C47 82 51 82 56 80L56 89 42 89Z M42 92H56V101H42Z M43 104H56V114C52 118 47 119 43 116Z')}
+      ${pair('quads', 'M39 126C44 124 49 125 54 128L52 149C50 164 47 177 45 185L39 184C37 167 35 150 37 136Z')}
+      ${pair('adductors', 'M53 125L57 127 56 144 51 163 50 143Z')}
+      ${pair('calves', calves)}
+      <path class="atlas-detail" d="M58 81v35M44 91h28M43 102h30M44 112h28M16 108l-4 16M100 108l4 16"/>
+      <text class="atlas-view-label" x="58" y="262">Frente</text>
     </g>
-    <g transform="translate(135 0)"><g class="anatomy-outline">${outline}</g>
-      ${region('shoulders', 'M31 51 44 47 41 64 28 73Z M76 47 89 51 92 73 79 64Z')}
-      ${region('back', 'M48 46 58 42 58 111 46 106 42 70Z M62 42 72 46 78 70 74 106 62 111Z')}
-      ${region('triceps', 'M28 77 38 70 33 92 23 99Z M82 70 92 77 97 99 87 92Z')}
-      ${region('glutes', 'M43 114 58 116 58 133 39 135Z M62 116 77 114 81 135 62 133Z')}
-      ${region('hamstrings', 'M39 139 56 137 50 174 41 174Z M64 137 81 139 79 174 70 174Z')}
-      ${region('calves', 'M41 180 51 178 48 205 44 208Z M69 178 79 180 76 208 72 205Z')}
-      <text x="60" y="245">Espalda</text>
+    <g transform="translate(137 4)">
+      <ellipse class="atlas-ground" cx="58" cy="240" rx="30" ry="3"/>
+      <g class="anatomy-outline">${outline}</g>
+      ${pair('back', 'M46 41C49 45 52 47 56 47L56 68 37 57 39 47Z M35 62L56 75V117L44 115C41 100 36 88 35 73Z')}
+      ${pair('shoulders', shoulders)}
+      ${pair('triceps', 'M23 72C27 68 30 68 33 69L29 92 18 103 20 88Z')}
+      ${pair('glutes', 'M40 121C45 118 51 119 56 123L56 139C51 143 44 144 37 140L38 128Z')}
+      ${pair('hamstrings', 'M37 145C43 148 49 147 54 143L50 170 46 185 39 185C37 169 36 155 37 145Z')}
+      ${pair('calves', calves)}
+      <path class="atlas-detail" d="M58 49v68M45 55l11 8M71 55 60 63M16 108l-4 16M100 108l4 16"/>
+      <text class="atlas-view-label" x="58" y="262">Espalda</text>
     </g>
   </svg>`;
 }

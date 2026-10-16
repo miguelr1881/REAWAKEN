@@ -21,6 +21,7 @@ const state = {
 const listeners = new Set();
 let pendingSync = null;
 let lastError = null;
+const SYNC_OWNER_META = 'syncDataOwner';
 export const onSyncChange = (fn) => { listeners.add(fn); return () => listeners.delete(fn); };
 const emit = () => listeners.forEach(fn => fn(status()));
 
@@ -200,6 +201,21 @@ const writers = {
 
 /* ============================== Sincronización ============================== */
 
+function routineContentKey(routine) {
+  return JSON.stringify({
+    name: String(routine?.name || ''),
+    days: Array.isArray(routine?.days) ? routine.days : []
+  });
+}
+
+function localRoutineConflictId(local) {
+  let id;
+  do {
+    id = `local-copy-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  } while (local.has(id));
+  return id;
+}
+
 async function syncTable(table, uid) {
   const remoteRows = (await rest(table, { query: `?select=*&user_id=eq.${uid}` })) || [];
   const remote = new Map(remoteRows.map(r => [r.id, toLocal[table](r)]));
@@ -208,9 +224,22 @@ async function syncTable(table, uid) {
   let pulled = 0;
   for (const [id, rec] of remote) {
     const mine = local.get(id);
-    if (!mine || (rec.updatedAt || 0) > (mine.updatedAt || 0)) {
-      await writers[table](rec);
-      local.set(id, rec);
+    const isLegacyRoutineSeed = table === 'routines' && mine?.id === 'active' && mine.source === 'legacy' && !mine.userModifiedAt;
+    if (isLegacyRoutineSeed && routineContentKey(mine) !== routineContentKey(rec)) {
+      const preserved = {
+        ...mine,
+        id: localRoutineConflictId(local),
+        name: `${mine.name || 'Mi rutina'} · copia local`,
+        active: false,
+        archived: true
+      };
+      await writers.routines(preserved);
+      local.set(preserved.id, preserved);
+    }
+    if (!mine || isLegacyRoutineSeed || (rec.updatedAt || 0) > (mine.updatedAt || 0)) {
+      const merged = table === 'routines' && mine && !isLegacyRoutineSeed ? { ...mine, ...rec } : rec;
+      await writers[table](merged);
+      local.set(id, merged);
       pulled++;
     }
   }
@@ -227,12 +256,28 @@ async function syncTable(table, uid) {
   return { pulled, pushed: toPush.length };
 }
 
+async function ensureSyncOwner(uid) {
+  const owner = await db.getMeta(SYNC_OWNER_META);
+  if (!owner) {
+    await db.setMeta(SYNC_OWNER_META, uid);
+    return;
+  }
+  if (owner !== uid) {
+    throw new Error('Este dispositivo conserva datos locales de otra cuenta. Se detuvo la sincronización para no mezclarlos.');
+  }
+}
+
 async function performSync() {
   if (!status().configured) throw new Error('Configura Supabase primero');
   if (!status().signedIn) throw new Error('Inicia sesión primero');
   if (!navigator.onLine) throw new Error('Sin conexión');
+  const sessions = await db.allSessions();
+  if (sessions.some(session => !session.finishedAt && !session.deletedAt)) {
+    throw new Error('Termina la sesión de entrenamiento antes de sincronizar. Tus datos siguen guardados aquí.');
+  }
 
   const uid = state.session.user.id;
+  await ensureSyncOwner(uid);
   const result = { pulled: 0, pushed: 0 };
   for (const table of ['routines', 'sessions', 'measures']) {
     const r = await syncTable(table, uid);
@@ -261,7 +306,10 @@ export function syncAll() {
 /** Sincroniza sin ruido: los errores no deben interrumpir un entrenamiento. */
 export async function syncQuietly() {
   try {
-    if (status().configured && status().signedIn && navigator.onLine) return await syncAll();
+    if (status().configured && status().signedIn && navigator.onLine) {
+      if (await db.getMeta(SYNC_OWNER_META) !== state.session.user.id) return null;
+      return await syncAll();
+    }
   } catch {
     // Se reintenta en la siguiente apertura.
   }

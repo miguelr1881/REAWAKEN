@@ -8,7 +8,7 @@
 
 Una app de entrenamiento personal que funciona sin conexión, conserva tu historial y convierte tus registros en una colección de progreso.
 
-![Versión](https://img.shields.io/badge/versión-2.8.8-5B3DF5?style=flat-square)
+![Versión](https://img.shields.io/badge/versión-2.9.2-5B3DF5?style=flat-square)
 ![PWA](https://img.shields.io/badge/PWA-offline--first-087982?style=flat-square)
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES_modules-F7DF1E?style=flat-square&logo=javascript&logoColor=14141a)
 ![Nube opcional](https://img.shields.io/badge/Supabase-opcional-167D36?style=flat-square)
@@ -23,6 +23,10 @@ Una app de entrenamiento personal que funciona sin conexión, conserva tu histor
 
 REAWAKEN es una **PWA de registro de entrenamiento**, diseñada para consultarse y utilizarse entre series. Combina una rutina editable, registro rápido de peso y repeticiones, temporizadores, historial, mediciones InBody y análisis determinista del progreso.
 
+Desde el 14 de octubre de 2026, el alcance es **uso exclusivo de Miguel**: sin marketplace, comunidad, rankings ni reseñas para terceros. La petición del 15 de octubre prioriza estética y mejoras de uso diario, sin exigir identificar kg o lb ni cambiar datos reales.
+
+La versión de esta carpeta es **2.9.2**; el sitio oficial comprobado el 14 de octubre todavía servía **2.8.9**. Una corrección local no implica que ya esté publicada.
+
 La idea es sencilla: **registrar lo que hiciste sin convertir cada serie en un formulario**. Las repeticiones del plan ya están visibles, el peso anterior sirve de referencia y puedes corregir lo necesario directamente en el ejercicio.
 
 - **Uso local sin cuenta:** la información se guarda primero en el dispositivo.
@@ -32,7 +36,7 @@ La idea es sencilla: **registrar lo que hiciste sin convertir cada serie en un f
 - **Nube opcional:** Supabase permite sincronizar; no es un requisito para entrenar.
 
 > [!IMPORTANT]
-> Este repositorio nació como una aplicación personal. Incluye una rutina, un perfil y mediciones iniciales personalizados. Antes de publicarlo o adaptarlo para otra persona, revisa esos datos. Las imágenes de ejemplo de este README utilizan datos ficticios.
+> Los recursos distribuibles ya no incluyen mediciones ni identidad de perfil precargadas. La plantilla histórica conserva sus IDs para compatibilidad, sin sembrarse en instalaciones nuevas. Las fotografías, PDFs y respaldos de la carpeta de trabajo GYM **no forman parte de la publicación**. Las imágenes de ejemplo utilizan datos ficticios; los registros reales del dispositivo no se borraron ni se reemplazaron.
 
 ## Vista Previa
 
@@ -59,9 +63,16 @@ Capturas de la interfaz generadas a **1760 × 1280 píxeles**. Abre cada imagen 
 | **Hoy** | Consultar la rutina, retomar una sesión, ver actividad semanal y acceder a tu balance. |
 | **Entrenamiento** | Registrar peso, ajustar reps, marcar ejercicios completados, usar temporizadores y añadir notas. |
 | **Rutinas** | Editar días y bloques, importar un PDF o texto, cambiar ejercicios y organizar ciclos. |
-| **Historial** | Consultar sesiones por fecha, revisar series y reps, corregir duración y ver el historial de un ejercicio. |
+| **Historial** | Consultar sesiones por fecha, corregir pesos o duración y buscar el historial de un ejercicio. |
+| **Progreso por ejercicio** | Ver la mayor carga de cada sesión con reps y contexto comparables, sin niveles de fuerza inventados. |
+| **PR al terminar** | Consultar la nueva marca, referencia anterior y serie de cada contexto superado, sin celebraciones repetidas. |
+| **Rutina con mis ejercicios** | Reutilizar por defecto los ejercicios de tus planes guardados, revisar un borrador y guardarlo como una rutina nueva e inactiva. |
+| **Mi gym y favoritos** | Crear fichas privadas, añadir lugar/colección, zona y etiquetas; filtrar y priorizar favoritos. |
+| **Actividad anual** | Ver sesiones por mes, cambiar de año y abrir sus fechas sin reiniciar el historial. |
+| **Descanso y pantalla** | Guardar un descanso por defecto y solicitar pantalla despierta durante el entrenamiento. |
 | **Tu balance** | Revisar trabajo registrado por día, semana, mes o ciclo. |
 | **Sugerencias de carga** | Recibir orientaciones para subir, mantener o bajar sin proponer pesos concretos. |
+| **PR por serie** | Marcar una carga superior a registros previos comparables por ejercicio, reps, equipo y unidad. |
 | **Muscle Battery** | Consultar una estimación de carga reciente por grupo muscular. |
 | **Lo que noté** | Ver cambios sostenidos en registros comparables y abrir las sesiones que los sustentan. |
 | **Mapa muscular** | Identificar zonas principales y secundarias de ejercicios y días de entrenamiento. |
@@ -89,8 +100,50 @@ Cada día se organiza en bloques con sus ejercicios, series, repeticiones y desc
 
 Las prescripciones especiales, como fallo, tiempos o secuencias de repeticiones, no se convierten en un objetivo numérico inventado.
 
+La marca de PR se recalcula al corregir peso o reps y al reabrir la sesión. El primer registro, un empate o un historial sin contexto suficiente no se presentan como una mejora. No se comparan asistencia, prescripciones especiales ni registros con diferentes equipos o unidades declarados.
+
+Cuando falta una referencia comparable o el plan es especial, aparece una explicación breve en lugar de inventar una recomendación. Actualizarla no debe desplazar un botón mientras recibe un toque.
+
 > [!NOTE]
 > Los campos de carga no imponen kg o lb: algunos gimnasios mezclan ambas unidades. Usa siempre la referencia del equipo correspondiente. La app no puede detectar una unidad o máquina diferente si ese cambio no quedó registrado.
+
+**Nuevo en 2.8.26:** desde Historial, abre una sesión y toca **Corregir** debajo de una serie registrada. El formulario muestra el peso anterior y conserva fecha, duración, reps, notas, equipo, snapshot y otras series. Cancelar no escribe; el guardado es atómico y rechaza cambios concurrentes, incluso si conservan la misma marca de tiempo. Los errores mantienen el valor para reintentar. La edición de duración comparte esta protección.
+
+**Tu progreso por ejercicio** reúne un buscador, sesiones y una curva de cargas. Cada punto es el máximo de una sesión para las mismas reps, plan y contexto declarado; equipos, variantes, notas o unidades diferentes quedan separados. Permite seguir la escala habitual sin convertir kg/lb. No calcula un 1RM, percentil ni nivel de fuerza, ni inventa metadatos de registros antiguos. Corregir un peso actualiza la curva y las referencias de PR sin celebrar de nuevo el entrenamiento pasado.
+
+La entrega también revisa jerarquía de Inicio, tarjetas, controles de entrenamiento, calendario y hojas en claro/oscuro. El entrenamiento conserva el protagonismo frente al recordatorio de InBody. No se han cambiado registros reales, tablas ni políticas de Supabase.
+
+### Rutinas Del Gym Y Acabado En 2.9.2
+
+- **Tu flujo del gym:** importar PDF o texto, revisar y guardar. **Mis rutinas → Crear rutina con mis ejercicios** usa por defecto esos planes, incluidos los archivados. Las fichas personales y el catálogo se incluyen solo si eliges esa fuente.
+- **Biblioteca sin copias nuevas:** reconstrucción atómica desde las rutinas guardadas, también tras descargarlas. Las fichas antiguas idénticas se agrupan sin borrarlas; los detalles personalizados distintos se conservan.
+- **Propuesta nueva e inactiva:** muestra los planes y nombres disponibles, conserva las indicaciones compatibles y requiere revisión. No reemplaza el plan del coach, no prescribe pesos ni completa con otra fuente sin avisar.
+- **Ancho estable entre pestañas:** contenido alineado en móvil y escritorio, espacio de scrollbar estable y posición de scroll por sección. El indicador de cristal se desliza sin mover los controles.
+- **Acabado cuidado:** reflejos más visibles, contraste comprobado y alternativas sólidas/sin movimiento. Mapa original de frente y espalda, con zonas diferenciadas; no mide activación muscular.
+- **Acciones claras:** Importar rutina del gym, Configurar entrenamiento y Crear rutina con mis ejercicios, en lugar de textos ambiguos.
+
+Las rutinas sincronizadas incluyen sus ejercicios. Los favoritos, etiquetas y cambios de las fichas independientes **siguen siendo locales y respaldables en JSON, no sincronizados**. Esta entrega no modifica Supabase ni publica la app.
+
+### Acabado Y Arranque En 2.9.1
+
+- Navegación flotante y cabeceras con cristal moderado, siguiendo las [recomendaciones de materiales de Apple](https://developer.apple.com/design/human-interface-guidelines/materials). Es una aproximación CSS para la PWA, no Liquid Glass nativo. Pesos, gráficas y formularios siguen siendo legibles.
+- Selección de vista accesible, áreas seguras y espacio inferior ajustado a la altura real de la barra. El modo de mayor contraste/reducción de transparencia usa una superficie sólida.
+- Carga real de los datos locales, sin demoras artificiales ni estadísticas vacías. Ante un fallo se puede reintentar sin borrar almacenamiento; la nube no bloquea el arranque local.
+- Cuatro imágenes propias de inicio para iOS, referencia 440×956 a 3×, sin copiar activos de DEX. La selección de esas imágenes y el comportamiento de Safari/PWA deben comprobarse en el teléfono.
+- Guardado del tema con aviso y recuperación del último confirmado. Descarte protegido frente a errores y escrituras tardías que pudieran recrear la sesión.
+
+### Novedades De 2.9.0
+
+- **Guardado visible y serializado:** Guardando, Guardado en este dispositivo y Sin guardar con reintento. La nube no se presenta como confirmada por un guardado local. Notas, descanso y preferencias quedan en el menú del entrenamiento.
+- **Rutinas y respaldos seguros:** se rechazan ediciones desde vistas obsoletas. Una importación con varias rutinas activas exige elegir; cambios de datos durante su confirmación cancelan el lote completo.
+- **Descanso persistente:** 45 s inicial, accesos 30/45/60 y personalizado de 1 a 3600 s. El bloque del coach manda; cambiar la preferencia no altera snapshots ni reinicia el reloj.
+- **Pantalla despierta opcional:** solo durante la vista de entrenamiento visible. Se libera al salir; depende del navegador, permisos y sistema.
+- **Generador privado:** fuentes explícitas, propuesta revisable, origen conservado y nueva rutina inicialmente inactiva. No inventa cargas ni modifica el plan del coach; avisa cuando faltan opciones.
+- **Organización personal:** fichas desde el catálogo, lugar/colección, zona, etiquetas, favoritos y último registro con ese nombre. No confirma disponibilidad ni equivalencia de máquinas.
+- **Configuración retomable:** perfil, preferencias, planes, propuestas o respaldos, sin borrar lo existente ni interpretar un fallo de lectura como una instalación vacía.
+- **Perfil independiente:** se guarda sin inventar un plan, entra en el respaldo y se reutiliza al activar un plan sin perfil propio. No oculta actualizaciones del perfil de la rutina activa. Su escritura y la copia en la rutina activa son atómicas y detectan cambios concurrentes. Restaura estos respaldos con 2.9.0 o posterior.
+
+Las preferencias de entrenamiento y las fichas se conservan en el respaldo, pero **todavía no se sincronizan con Supabase**. Tampoco se declara cerrado el aislamiento por proyecto/app ni la fusión de conflictos entre dispositivos.
 
 ### 2. Descansos, Temporizadores Y Cierre
 
@@ -116,7 +169,7 @@ La duración puede corregirse en **horas y minutos**, entre un minuto y 24 horas
 
 ### 3. Importar Y Editar Rutinas
 
-En **Ajustes → Mi rutina** puedes editar el plan actual, importar otro o restaurar la rutina original incluida en el proyecto.
+En **Ajustes → Mi rutina** puedes abrir la biblioteca, editar la rutina activa, importar planes, crear rutinas desde cero y restaurar rutinas archivadas. Las instalaciones nuevas empiezan sin el plan personal incluido en la instalación legacy de Miguel.
 
 El editor permite trabajar por días y modificar títulos, bloques, ejercicios, series, reps, descansos, tipo de registro, notas y grupo muscular. También incluye operaciones de organización como reordenar ejercicios, duplicar bloques y deshacer eliminaciones.
 
@@ -126,7 +179,14 @@ El editor permite trabajar por días y modificar títulos, bloques, ejercicios, 
 2. Selecciona **Cargar PDF**.
 3. Espera la lectura local y revisa sus avisos.
 4. Corrige el resultado en el editor.
-5. Decide si empieza un ciclo nuevo y guarda.
+5. Ponle nombre, decide si será la rutina activa y guarda. La importación crea una entrada nueva; no reemplaza silenciosamente otra rutina.
+
+#### Desde cero
+
+1. Abre **Crear rutina desde cero**.
+2. Define el nombre y la activación del plan.
+3. Añade días, bloques y ejercicios en el editor.
+4. Guarda y cambia de rutina desde la biblioteca cuando lo necesites.
 
 La lectura se hace con **PDF.js**, incluido en la app. El documento se procesa en el dispositivo: no se sube a Supabase ni a un servicio de interpretación.
 
@@ -146,7 +206,9 @@ También puedes pegar el plan como texto. Si el documento es una fotografía o u
 
 #### Ciclos y conservación del historial
 
-Una rutina nueva puede iniciar un **ciclo** para separar su balance del plan anterior. Editar sin marcar esa opción mantiene el ciclo actual.
+Una rutina nueva puede iniciar un **ciclo** para separar su balance del plan anterior. Editar sin marcar esa opción mantiene el ciclo actual. La biblioteca permite duplicar, activar, archivar y restaurar rutinas sin borrar las sesiones.
+
+Activar otra rutina guarda el cambio de activa y las copias históricas pendientes en una sola transacción. El guardado del editor también incluye el archivo del ciclo anterior, el plan y sus fichas de ejercicios: si una escritura falla, se revierte ese lote. Las activaciones concurrentes consultan la base antes de decidir; si la rutina activa cambió mientras editabas, debes reabrir el editor. Las series pendientes siguen su guardado habitual, separado de la biblioteca.
 
 Las sesiones conservan una copia de su rutina, llamada *snapshot*. Por eso, cambiar las series de tu plan actual no reescribe lo que estaba previsto en un entrenamiento anterior ni modifica una sesión ya iniciada.
 
@@ -340,9 +402,11 @@ El almacenamiento local no es un respaldo permanente garantizado: puede perderse
 
 En **Ajustes → Respaldo** puedes exportar un archivo JSON e importar uno guardado anteriormente.
 
-El respaldo conserva información de sesiones, mediciones y rutinas, incluido el perfil vinculado a la rutina y los metadatos de entrenamiento utilizados por el análisis. No es una copia completa de las preferencias o credenciales del navegador.
+El respaldo conserva sesiones, mediciones, rutinas, fichas de ejercicios, preferencias de entrenamiento y el perfil personal o vinculado a la rutina, además de los metadatos de entrenamiento utilizados por el análisis. No incluye credenciales ni la configuración de la cuenta o del navegador.
 
-Al importar, la app solicita confirmación y fusiona el contenido válido con lo que ya existe. **Los registros con el mismo identificador se sobrescriben**; por eso conviene exportar primero una copia del estado actual.
+Al importar, la app valida el archivo completo antes de pedir confirmación; no descarta filas inválidas en silencio. Sesiones, mediciones, rutinas y ejercicios se fusionan en una sola transacción: si falla una escritura, se revierte el lote entero. **Los registros con el mismo identificador se sobrescriben**; los demás se conservan. Exporta primero una copia del estado actual y termina el entrenamiento o guarda la edición abierta antes de importar.
+
+Si la fusión deja varias rutinas activas, debes elegir una antes de confirmar; las demás se conservan. Un cambio local durante esa confirmación cancela el lote sin sobrescribirlo. Estas garantías no resuelven conflictos remotos. Un fallo al refrescar la pantalla después de guardar se informa por separado.
 
 Buenas prácticas:
 
@@ -361,22 +425,24 @@ El recordatorio de respaldo no aparece en cada sesión: necesita historial sufic
 
 La app funciona sin Supabase. Actívalo cuando necesites guardar una copia sincronizada y utilizar la misma cuenta en varios dispositivos.
 
+El proyecto existente se comparte con la app de Cris. REAWAKEN usa `public.sessions`, `public.measures` y `public.routines`; `public.cris_diaries` pertenece a Cris. No se deben renombrar tablas, retirar RLS ni ejecutar el esquema completo para conectar otro dispositivo propio.
+
 ### Configuración Inicial
 
-1. Crea un proyecto en Supabase.
-2. Abre su SQL Editor y ejecuta [app/sql/schema.sql](app/sql/schema.sql).
+1. Para el uso actual, utiliza el proyecto existente; no crees otro por el cambio a una app personal.
+2. [sql/schema.sql](sql/schema.sql) es una referencia para una instalación nueva y vacía. En un proyecto compartido, cualquier migración requiere revisión, respaldo y autorización específica.
 3. Verifica la configuración de autenticación con correo y contraseña, incluida la confirmación de correo que decidas utilizar.
 4. En REAWAKEN, abre **Ajustes → Sincronización → Conectar Supabase**.
 5. Introduce la URL del proyecto y su clave pública `anon` o `publishable` compatible.
-6. Crea una cuenta o inicia sesión.
-7. Sincroniza y comprueba los datos antes de utilizar otro dispositivo.
+6. Inicia sesión con la cuenta existente de REAWAKEN; no crees otra para resolver un problema de acceso.
+7. Comprueba primero qué datos existen en cada dispositivo. Un envío o una resolución de conflictos debe ser una decisión explícita, no una prueba con datos ficticios.
 
 > [!CAUTION]
 > Nunca introduzcas una clave `service_role` ni una clave secreta en una aplicación cliente. La clave pública no sustituye la seguridad de la base de datos: las tablas deben tener RLS y políticas de acceso por usuario, como las del esquema incluido.
 
 ### Proyectos Existentes
 
-Si tu esquema es anterior al soporte de perfil, ejecuta [app/sql/add-profile.sql](app/sql/add-profile.sql). Los detalles están en [SUPABASE-PERFIL.md](SUPABASE-PERFIL.md).
+Si tu esquema es anterior al soporte de perfil, revisa [sql/add-profile.sql](sql/add-profile.sql) antes de autorizar una migración. No ejecutarla de nuevo por defecto en el proyecto compartido.
 
 Si falta `routines.profile`, el perfil puede seguir guardándose localmente, pero la sincronización fallará hasta aplicar la migración. No borres datos locales para solucionar ese error.
 
@@ -386,7 +452,9 @@ Si falta `routines.profile`, el perfil puede seguir guardándose localmente, per
 | :--- | :--- |
 | `sessions` | Sesiones, entradas de ejercicios, notas, contexto de entrenamiento y copia de la rutina. |
 | `measures` | Fechas y valores de las mediciones corporales. |
-| `routines` | Rutina activa, ciclos archivados y perfil. |
+| `routines` | Rutinas, días, bloques, ejercicios y perfil; los metadatos de archivo/origen todavía no viajan completos. |
+
+Al descargar las rutinas se reconstruye una biblioteca local de sus ejercicios, sin duplicarla en cada arranque. Las propuestas usan por defecto esos planes guardados. La sincronización de fichas independientes (favoritos, lugar, zona, etiquetas y cambios propios) y preferencias sigue pendiente; el respaldo JSON sí las conserva. Iniciar sesión no demuestra una recuperación completa de todos los datos locales.
 
 La integración utiliza las API REST de Supabase, sin su SDK. Resuelve conflictos por `updatedAt`: gana el registro completo más reciente, **no se fusionan campos individuales**. Evita editar el mismo registro desde dos dispositivos sin sincronizar entre cambios.
 
@@ -408,12 +476,12 @@ Los PDF originales no se sincronizan: se guarda la rutina que confirmaste despu�
 
 Revisa especialmente:
 
-- [app/data/seed-measures.json](app/data/seed-measures.json): mediciones que pueden sembrarse en una instalación nueva.
-- [app/js/routine.js](app/js/routine.js): rutina inicial y configuración personalizada.
+- [data/seed-measures.json](data/seed-measures.json): recurso de compatibilidad vacío; no volver a incluir mediciones reales.
+- [js/routine.js](js/routine.js): plantilla histórica anónima; conservar IDs y no volver a introducir identidad ni fechas personales.
 - Capturas, documentos, vídeos y archivos de respaldo que hayas añadido.
 - Cualquier archivo de configuración local que contenga credenciales.
 
-**No publiques contraseñas, tokens, claves secretas ni respaldos personales.** Sustituye o retira los datos iniciales personales antes de presentar la app como una plantilla genérica. Este README no modifica esos archivos.
+**No publiques contraseñas, tokens, claves secretas ni respaldos personales.** Distribuye únicamente los recursos revisados de la aplicación; nunca toda la carpeta de trabajo GYM.
 
 <a id="publicacion"></a>
 ## Publicación
@@ -424,30 +492,23 @@ Publica **la carpeta completa**: no basta con subir el HTML. Incluye los módulo
 
 ### GitHub Pages
 
-Hay dos opciones habituales:
-
-#### Conservar este repositorio tal como está
-
-1. Sube los archivos al repositorio, después de revisar los datos personales.
-2. En GitHub, abre **Settings → Pages**.
-3. Selecciona **Deploy from a branch**.
-4. Elige la rama que contiene el proyecto y la carpeta **`/ (root)`**.
-5. Guarda y espera al despliegue.
-6. Abre la dirección de Pages añadiendo **`app/`** al final de la ruta del repositorio.
-
-Por ejemplo, para un sitio de proyecto:
+La instalación existente usa la raíz del repositorio publicado:
 
 ```text
-https://TU_USUARIO.github.io/TU_REPOSITORIO/app/
+https://miguelr1881.github.io/REAWAKEN/
 ```
 
-La página principal del repositorio seguirá mostrando este README; la aplicación estará bajo `/app/` en Pages. Esta modalidad puede publicar otros archivos del repositorio como parte del sitio: revisa qué incluyes.
+**No añadas `/app/` a esa URL ni cambies origen/ruta al actualizar.** Esta carpeta corresponde al contenido de la raíz publicada.
 
-#### Publicar únicamente la aplicación
+Con autorización de Miguel:
 
-Configura un despliegue estático o un workflow de GitHub Actions cuyo directorio publicado sea **`app/`**. Así el HTML queda en la raíz del sitio resultante y la documentación del repositorio no forma parte del artefacto publicado.
+1. Exporta un respaldo desde el teléfono y termina el entrenamiento y cualquier edición.
+2. Usa **GitHub web**, no Git local, para revisar y actualizar el repositorio personal existente.
+3. Publica el **contenido completo de esta carpeta** en la raíz: HTML, módulos, CSS, fuentes, imágenes, iconos, manifiesto, worker y PDF.js. No subas GYM, sus fotografías, PDFs o respaldos.
+4. Conserva la configuración comprobada de Pages, `main` y `/ (root)`, salvo una decisión explícita posterior.
+5. Espera al despliegue y comprueba la versión servida y después la versión realmente cargada en la PWA.
 
-Este README describe ambas opciones; no crea un workflow ni realiza un despliegue automáticamente.
+No se creó un workflow ni se ejecutó una publicación como parte de esta entrega.
 
 ### Actualizaciones
 
@@ -469,7 +530,7 @@ No cambies el identificador de IndexedDB para renombrar la aplicación: sigue si
 | Componente | Implementación |
 | :--- | :--- |
 | Interfaz | HTML, CSS y JavaScript con módulos ES |
-| Almacenamiento local | IndexedDB, base `gymtrack`, versión 3 |
+| Almacenamiento local | IndexedDB, base `gymtrack`, versión 4 |
 | Uso offline | Service worker y Cache Storage |
 | Instalación | Web App Manifest |
 | Importación PDF | PDF.js 4.10.38 incluido localmente |
@@ -524,6 +585,10 @@ No cambies el identificador de IndexedDB para renombrar la aplicación: sigue si
 - [app/js/app.js](app/js/app.js): navegación, registro, editor, historial, ajustes y coordinación de la interfaz.
 - [app/js/db.js](app/js/db.js): persistencia local y operaciones de base de datos.
 - [app/js/intelligence.js](app/js/intelligence.js): sugerencias, balance, recuperación orientativa y observaciones.
+- [js/session-history.js](js/session-history.js): corrección de una carga sin alterar otros campos y series históricas comparables.
+- [js/personal-records.js](js/personal-records.js): PR finales derivados de referencias comparables.
+- [js/training-preferences.js](js/training-preferences.js): validación de preferencias y ciclo de pantalla despierta.
+- [js/routine-generator.js](js/routine-generator.js): propuestas deterministas, fuentes y trazabilidad.
 - [app/js/training-ui.js](app/js/training-ui.js): presentación de los análisis y su evidencia.
 - [app/js/progress.js](app/js/progress.js): duración y logros derivados del historial.
 - [app/js/exercise-info.js](app/js/exercise-info.js): grupos musculares e información de ejercicios.
@@ -561,9 +626,28 @@ Con el servidor local iniciado, abre:
 http://localhost:8766/tests/
 ```
 
-La suite actual reúne **116 comprobaciones** de inteligencia, progreso e importación de rutinas. El resultado se presenta en la página de pruebas.
+La suite actual reúne **293 comprobaciones** de inteligencia, progreso, importación, biblioteca, historial y herramientas personales. Incluye conservación de metadatos, recorrido JSON de respaldos, perfil sin plan, PR finales, preferencias y generación sin modificar fuentes.
 
 ### Pruebas De Interfaz
+
+Desde la carpeta de trabajo que contiene `tools`, estos verificadores crean su propio servidor y contextos aislados:
+
+```powershell
+python .\tools\test_apple_ui.py
+python .\tools\test_personal_tools.py
+python .\tools\test_cache_update.py
+python .\tools\test_history_corrections.py
+python .\tools\test_training_persistence.py
+python .\tools\test_ui_polish.py
+python .\tools\test_backup_restore.py
+python .\tools\test_chat_review.py
+```
+
+Los verificadores cubren cancelación, fallo/reintento, doble envío, dos ventanas, datos antiguos, fuentes del generador, preferencias, fichas, actividad anual, cuatro tamaños y funcionamiento offline en Edge. `--screenshots RUTA` conserva capturas. Las nuevas herramientas personales también se prueban con `--browser webkit`; Wake Lock se simula, no se certifica una pantalla física. La recarga offline de WebKit/Windows sigue sin validación física.
+
+`test_apple_ui.py` comprueba arranque lento/fallido, recuperación, tema/descarte, contraste, áreas seguras, etiquetas ampliadas y recursos offline. Las imágenes de inicio se regeneran con `python .\tools\make_launch_screens.py`, usando exclusivamente el icono de REAWAKEN.
+
+La prueba de caché espera que el worker esté **activated**, reproduce una escritura tardía de un worker retirado y comprueba que se conservan IndexedDB, cachés ajenas y versiones futuras. `controllerchange` puede llegar antes de acabar `activate`; `networkidle` tampoco demuestra que la instalación haya terminado.
 
 Requisitos adicionales: Python, Microsoft Edge, Playwright, Pillow e `imageio-ffmpeg`. Esta última dependencia también es necesaria para importar el generador de ejemplos que utiliza la prueba de la guía. Instala las dependencias de las herramientas:
 

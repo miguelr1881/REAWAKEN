@@ -1,4 +1,4 @@
-import { repTarget, nextSetAdvice, comparisonKey, periodBounds, periodSummary, trainingInsights, recoveryEstimate, muscleContributions, setRecord, machineAlternative, repChanges, weeklyRepAdvice } from '../js/intelligence.js';
+import { repTarget, nextSetAdvice, comparisonKey, personalBestForSet, periodBounds, periodSummary, trainingInsights, recoveryEstimate, muscleContributions, setRecord, machineAlternative, repChanges, weeklyRepAdvice } from '../js/intelligence.js';
 import { sanitizeRoutine } from '../js/routine-parser.js';
 import { createTrainingUI } from '../js/training-ui.js';
 
@@ -145,5 +145,76 @@ export function runIntelligenceTests() {
   assert(inline.extras(fresh, movement, day.blocks[0]).includes('Serie 2'), 'advice follows the next unrecorded weight');
   fresh.entries[movement.id][1] = '50';
   assert(!inline.extras(fresh, movement, day.blocks[0]).includes('next-advice'), 'legacy recorded weight does not appear as a pending set');
+  const hipThrust = { id: 'hip-free', name: 'Hip thrust libre', reps: '10', kind: 'weight' };
+  const unilateral = { id: 'hip-single', name: 'Hip thrust unilateral', note: 'Mancuerna sobre el cuádriceps', reps: '12', kind: 'weight' };
+  const hipBlock = { sets: 3, movements: [hipThrust, unilateral] };
+  const hipSession = { id: 'hip-session', startedAt: now, finishedAt: null,
+    routineSnapshot: { id: 'hip-day', blocks: [hipBlock] },
+    entries: { [hipThrust.id]: ['30', '', ''], [unilateral.id]: ['25', '', ''] } };
+  inline.updateInlineRecord(hipSession, hipThrust, 0, '10');
+  inline.updateInlineRecord(hipSession, unilateral, 0, '12');
+  const hipBefore = JSON.stringify(hipSession);
+  assert(inline.extras(hipSession, hipThrust, hipBlock).includes('Mantén la carga'), 'screenshot: free hip thrust has load advice');
+  assert(inline.extras(hipSession, unilateral, hipBlock).includes('Mantén la carga'), 'completed unilateral set supports load advice');
+  assert(inline.repsInput(hipSession, unilateral, 0).includes('value="12"'), 'unilateral coach reps are not doubled');
+  const reversedHipBlock = { ...hipBlock, movements: [unilateral, hipThrust] };
+  assert(inline.extras(hipSession, hipThrust, reversedHipBlock).includes('Mantén la carga'), 'second movement can display load advice');
+  assert(inline.extras(hipSession, unilateral, reversedHipBlock).includes('Serie 2'), 'unilateral advice follows next set regardless of block position');
+  assert(repTarget({ ...hipThrust, note: 'Unilateral' })?.max === 10, 'unilateral note alone does not exclude numeric prescription');
+  assert(JSON.stringify(hipSession) === hipBefore, 'rendering advice does not mutate recorded weights or snapshot');
+  for (const note of ['Al fallo', 'Bajando peso por tramo', '12+15']) assert(repTarget({ ...unilateral, note }) === null, 'special unilateral plan remains excluded');
+  assert(comparisonKey(unilateral, choice) !== comparisonKey({ ...unilateral, name: hipThrust.name }, choice), 'unilateral and bilateral histories stay separate');
+  const fewerHipReps = structuredClone(hipSession);
+  inline.updateInlineRecord(fewerHipReps, unilateral, 0, '10');
+  assert(nextSetAdvice(fewerHipReps, unilateral, 1, [], dayFor).direction === 'decrease', 'unilateral advice respects recorded reps below the plan');
+  const completeHip = structuredClone(hipSession);
+  completeHip.entries[unilateral.id] = ['25', '25', '25'];
+  assert(!inline.extras(completeHip, unilateral, hipBlock).includes('next-advice'), 'no next-set advice after completing all unilateral sets');
+  const emptyHip = structuredClone(hipSession);
+  emptyHip.entries[unilateral.id] = ['', '', ''];
+  assert(!inline.extras(emptyHip, unilateral, hipBlock).includes('next-advice'), 'no unilateral advice without a valid recorded reference');
+  assert(inline.extras(emptyHip, unilateral, hipBlock).includes('Primera referencia'), 'missing advice has a visible reason without a numeric suggestion');
+  assert(inline.extras(emptyHip, { ...unilateral, reps: 'Al fallo' }, hipBlock).includes('Plan especial del coach'), 'special prescriptions explain why no load advice is offered');
+  const partialTracking = make(1);
+  const preservedChoice = JSON.stringify(partialTracking.entries._training.choices);
+  delete partialTracking.entries._training.sets;
+  inline.updateInlineRecord(partialTracking, movement, 0, '10');
+  assert(setRecord(partialTracking, movement.id, 0)?.reps === 10, 'legacy metadata without sets accepts a new explicit record');
+  assert(JSON.stringify(partialTracking.entries._training.choices) === preservedChoice, 'adding the missing sets container preserves equipment choices');
+  delete partialTracking.entries._training.choices;
+  inline.updateInlineRecord(partialTracking, movement, 0, '8');
+  assert(setRecord(partialTracking, movement.id, 0)?.label === choice.label, 'missing choices do not erase the equipment stored with a set');
+
+  const prHistory = make(1, 50, 10);
+  const prSession = make(7, 55, 10);
+  prSession.startedAt = now; prSession.finishedAt = null;
+  const prBefore = JSON.stringify([prSession, prHistory]);
+  assert(personalBestForSet(prSession, movement, 0, [prHistory], dayFor) === 50, 'modern metadata supports a PR with the same exercise, reps, equipment and unit');
+  assert(personalBestForSet(prSession, movement, 0, [], dayFor) === null, 'a first record is not an improvement');
+  assert(personalBestForSet(prSession, movement, 1, [prHistory], dayFor) === null, 'an unrecorded set cannot claim a PR');
+  assert(personalBestForSet(prSession, { ...movement, name: 'Dominadas asistidas' }, 0, [prHistory], dayFor) === null, 'assistance is not a maximum-load PR');
+  assert(personalBestForSet(prSession, { ...movement, note: 'Al fallo' }, 0, [prHistory], dayFor) === null, 'special prescriptions do not infer PR comparability');
+  for (const change of [
+    previous => { previous.entries._training.sets[movement.id][0].unit = 'lb'; },
+    previous => { previous.entries._training.sets[movement.id][0].label = 'Maquina B'; },
+    previous => { previous.entries._training.sets[movement.id][0].variant = 'alternative'; },
+    previous => { previous.entries._training.sets[movement.id][0].reps = 8; },
+    previous => { previous.entries[movement.id][0] = '48'; },
+    previous => { delete previous.entries._training.sets[movement.id][0].reps; },
+    previous => { delete previous.entries._training.sets[movement.id][0].unit; },
+    previous => { delete previous.entries._training; },
+    previous => { previous.routineSnapshot.blocks[0].movements[0].reps = '12'; },
+    previous => { previous.routineSnapshot.blocks[0].movements[0].name += ' unilateral'; },
+    previous => { previous.routineSnapshot.blocks[0].movements[0].note = 'Otro agarre'; },
+    previous => { previous.routineSnapshot.blocks[0].movements[0].id = 'other-exercise'; },
+    previous => { delete previous.routineSnapshot; },
+    previous => { previous.finishedAt = null; },
+    previous => { previous.deletedAt = now; },
+    previous => { previous.startedAt = now + 1; }
+  ]) {
+    const previous = structuredClone(prHistory); change(previous);
+    assert(personalBestForSet(prSession, movement, 0, [previous], dayFor) === null, 'incompatible, ambiguous, deleted or unfinished history cannot create a PR');
+  }
+  assert(JSON.stringify([prSession, prHistory]) === prBefore, 'PR detection does not rewrite records or snapshots');
   return { checks, result: 'PASS' };
 }
