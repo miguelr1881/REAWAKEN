@@ -1,12 +1,19 @@
 import { repPrescription, repTarget, equipmentChoice, setRecord, nextSetAdvice, normalizeExercise, periodBounds, periodSummary, recoveryEstimate, trainingInsights, repChanges, weeklyRepAdvice } from './intelligence.js';
 import { MUSCLE_GROUPS, muscleAtlas, dayFocus } from './exercise-info.js';
 
-export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, saveSession, redraw, showSession, onSaveError = () => {} }) {
+export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, saveSession, redraw, showSession, onRecordChange, onSaveError = () => {} }) {
   const select = selector => document.querySelector(selector);
   const selectAll = selector => [...document.querySelectorAll(selector)];
   let reportMode = 'week', reportAnchor = Date.now(), reportCycle = 'legacy';
+  let pointerActive = false, pointerBound = false;
+  const pendingAdvice = new Map();
   const date = timestamp => new Date(timestamp).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric' });
-  const tracking = session => session.entries._training ||= { version: 1, sets: {}, choices: {} };
+  const tracking = session => {
+    const data = session.entries._training ||= { version: 1 };
+    data.sets ||= {};
+    data.choices ||= {};
+    return data;
+  };
   const recordText = record => `${Number.isInteger(record.reps) ? `${record.reps} reps${record.repsSource === 'plan' ? ' del plan' : ''}` : 'Peso registrado'}${Number.isInteger(record.rir) ? ` · ${record.rir === 3 ? '3+' : record.rir} en reserva` : ''}${record.discomfort ? ' · Molestia' : ''} · ${record.label} (${record.unit})`;
 
   function repChangesHtml(sessions) {
@@ -55,10 +62,11 @@ export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, sa
       const raw = session.entries[movement.id]?.[index];
       return typeof raw !== 'string' || raw.trim() === '' || !Number.isFinite(Number(raw)) || Number(raw) < 0;
     });
-    const candidate = next !== undefined && repTarget(movement) ? nextSetAdvice(session, movement, next, state.sessions, dayFor) : null;
-    const advice = candidate?.text === 'Primera referencia' ? null : candidate;
+    const candidate = next !== undefined ? nextSetAdvice(session, movement, next, state.sessions, dayFor) : null;
+    const referenceOnly = candidate && (!repTarget(movement) || candidate.text === 'Primera referencia');
+    const advice = referenceOnly ? null : candidate;
     const weekly = weeklyRepAdvice(session, movement, state.sessions, dayFor);
-    return `${advice ? `<div class="next-advice"><div><span class="eyebrow">Siguiente · Serie ${next + 1}</span><strong>${esc(advice.text)}</strong><small>${esc(advice.reason)}</small></div></div>` : ''}${weekly ? `<p class="training-caption weekly-reps">${esc(weekly.text)}</p>` : ''}`;
+    return `${advice ? `<div class="next-advice"><div><span class="eyebrow">Siguiente · Serie ${next + 1}</span><strong>${esc(advice.text)}</strong><small>${esc(advice.reason)}</small></div></div>` : ''}${referenceOnly ? `<p class="training-caption advice-status" role="status">${esc(candidate.text)} · ${esc(candidate.reason)}</p>` : ''}${weekly ? `<p class="training-caption weekly-reps">${esc(weekly.text)}</p>` : ''}`;
   }
 
   function workoutNote(day) {
@@ -68,6 +76,24 @@ export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, sa
   }
 
   function bind(day) {
+    if (!pointerBound) {
+      pointerBound = true;
+      document.addEventListener('pointerdown', () => { pointerActive = true; }, { capture: true, passive: true });
+      document.addEventListener('mousedown', () => { pointerActive = true; }, { capture: true, passive: true });
+      const releasePointer = () => {
+        pointerActive = false;
+        // El consejo no debe mover el destino entre pointerdown y click.
+        setTimeout(() => {
+          const pending = [...pendingAdvice.values()];
+          pendingAdvice.clear();
+          for (const item of pending) if (state.session?.id === item.sessionId) refreshAdvice(item.day, item.movementId);
+        }, 0);
+      };
+      document.addEventListener('pointerup', releasePointer, { capture: true, passive: true });
+      document.addEventListener('mouseup', releasePointer, { capture: true, passive: true });
+      document.addEventListener('pointercancel', releasePointer, { capture: true, passive: true });
+      window.addEventListener('blur', releasePointer);
+    }
     const movementFor = id => day.blocks.flatMap(block => block.movements).find(movement => movement.id === id);
     selectAll('#blocks [data-reps]').forEach(input => {
       const cell = input.closest('.set'), movement = movementFor(cell.dataset.mid), index = Number(cell.dataset.idx);
@@ -77,7 +103,9 @@ export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, sa
         data.repDrafts[movement.id] ||= [];
         data.repDrafts[movement.id][index] = input.validity.valid && input.value !== '' ? Number(input.value) : null;
         updateInlineRecord(state.session, movement, index, input.value);
+        onRecordChange?.(movement.id);
         saveSession();
+        refreshAdvice(day, movement.id);
       };
       input.oninput = store;
       input.onblur = () => {
@@ -91,17 +119,22 @@ export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, sa
   }
 
   function refreshAdvice(day, movementId) {
+    if (pointerActive) {
+      pendingAdvice.set(movementId, { day, movementId, sessionId: state.session?.id });
+      return;
+    }
     const block = day.blocks.find(item => item.movements.some(movement => movement.id === movementId));
     const slot = selectAll('[data-training-extra]').find(item => item.dataset.trainingExtra === movementId);
     if (slot && block) {
       const template = document.createElement('template');
       template.innerHTML = extras(state.session, block.movements.find(item => item.id === movementId), block);
-      const incoming = template.content.querySelector('.next-advice');
-      const existing = slot.querySelector('.next-advice');
-      if (existing && incoming) {
-        existing.firstElementChild.replaceChildren(...incoming.firstElementChild.childNodes);
-      } else if (incoming) slot.append(incoming);
-      else existing?.remove();
+      for (const selector of ['.next-advice', '.advice-status', '.weekly-reps']) {
+        const incoming = template.content.querySelector(selector);
+        const existing = slot.querySelector(selector);
+        if (existing && incoming) existing.replaceChildren(...incoming.childNodes);
+        else if (incoming) slot.append(incoming);
+        else existing?.remove();
+      }
       bind(day);
     }
   }

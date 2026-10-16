@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="es" data-build="2.8.9">
+<html lang="es" data-build="2.9.2" data-boot="loading">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -27,25 +27,35 @@
 </script>
 <link rel="manifest" href="manifest.webmanifest" />
 <link rel="apple-touch-icon" href="icons/icon-180.png" />
-<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-startup-image" href="icons/launch-portrait-dark.png" media="screen and (device-width: 440px) and (device-height: 956px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait) and (prefers-color-scheme: dark)" />
+<link rel="apple-touch-startup-image" href="icons/launch-portrait-light.png" media="screen and (device-width: 440px) and (device-height: 956px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait) and (prefers-color-scheme: light)" />
+<link rel="apple-touch-startup-image" href="icons/launch-landscape-dark.png" media="screen and (device-width: 440px) and (device-height: 956px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape) and (prefers-color-scheme: dark)" />
+<link rel="apple-touch-startup-image" href="icons/launch-landscape-light.png" media="screen and (device-width: 440px) and (device-height: 956px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape) and (prefers-color-scheme: light)" />
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<link rel="icon" type="image/png" href="icons/icon-192.png" />
 <link rel="preload" href="fonts/BarlowSemiCondensed-Bold.ttf" as="font" type="font/ttf" crossorigin />
-<link rel="stylesheet" href="css/styles.css?v=2.8.9" />
+<link id="app-style" rel="stylesheet" href="css/styles.css?v=2.9.2" onerror="document.documentElement.dataset.styleError='true'" />
 </head>
 <body>
 
 <div class="aurora" id="aurora"></div>
 
-<div id="app">
+<section class="launch-screen" id="launch-screen" aria-label="Abriendo REAWAKEN">
+  <div class="launch-emblem"><span class="launch-orbit" aria-hidden="true"></span><img class="launch-mark" src="icons/icon-512.png" width="96" height="96" alt="" /></div>
+  <div class="launch-copy"><strong class="launch-wordmark">REAWAKEN</strong><p id="launch-status" role="status">Preparando tu entrenamiento…</p><button class="btn btn-ghost" id="launch-retry" type="button" hidden>Reintentar</button></div>
+</section>
+<noscript><style>#launch-screen{display:none}</style><p class="noscript-message">Activa JavaScript para abrir REAWAKEN. Tus datos no se han borrado.</p></noscript>
+
+<div id="app" inert aria-busy="true" hidden>
 
   <!-- ============ HOY ============ -->
   <section class="view active" id="view-home">
     <div class="page">
       <div class="hero">
         <div class="brand-line"><img src="icons/icon-192.png" width="28" height="28" alt="" /><span>REAWAKEN</span><button class="icon-btn achievements-button" id="btn-achievements" aria-label="Logros" title="Tus logros"><img class="trophy-icon" src="icons/trophy.svg" width="23" height="23" alt=""></button></div>
-        <p class="greet" id="greeting">Hola, Miguel</p>
+        <p class="greet" id="greeting">Hola</p>
         <h1 class="title-xl">Tu entrenamiento</h1>
         <p class="date" id="today-date"></p>
-        <div id="inbody-reminder"></div>
         <div class="stats-row">
           <div class="stat"><b id="stat-week">0</b><span>Esta semana</span></div>
           <div class="stat"><b id="stat-total">0</b><span>Sesiones</span></div>
@@ -56,16 +66,17 @@
 
       <div id="resume-slot"></div>
       <div id="next-slot"></div>
+      <div id="inbody-reminder"></div>
       <button class="open-training-progress progress-entry" id="home-progress"><span>Tu balance</span><small>Semana · Recuperación · Lo que noté</small><span aria-hidden="true">›</span></button>
       <div id="routine-alert"></div>
 
       <h2 class="section-title" id="routine-heading">Tu rutina</h2>
       <div class="day-list" id="day-list"></div>
 
-      <h2 class="section-title">Nota del entrenador</h2>
+      <h2 class="section-title">Tu plan, a tu ritmo</h2>
       <div class="coach-note">
         <p style="font-size:13.5px;line-height:1.55;color:var(--text-2)">
-          Cada semana subir pesos y al cardio aumentar 3 min.<br />
+          Conserva las indicaciones de tu coach y registra lo que realmente hiciste.<br />
           <span style="color:var(--text-3)" id="coach-credit"></span>
         </p>
       </div>
@@ -83,14 +94,12 @@
           <strong id="wh-name">—</strong>
           <small id="wh-sub">—</small>
         </div>
-        <button class="icon-btn" id="btn-notes" aria-label="Nota del entrenamiento">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4h9l5 5v11H6z"/><path d="M14 4v6h6M9 14h7M9 17.5h5"/></svg>
-        </button>
-        <button class="icon-btn" id="btn-timer" aria-label="Temporizador">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 2h6"/></svg>
+        <button class="icon-btn" id="btn-workout-menu" aria-label="Opciones del entrenamiento">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
         </button>
       </div>
       <div class="progress-track"><div class="progress-fill" id="wh-progress" style="width:0%"></div></div>
+      <div class="workout-save" id="workout-save" data-state="saved"><span id="session-save-status" role="status" aria-live="polite">Guardado en este dispositivo</span><button id="retry-session-save" type="button" hidden>Reintentar</button></div>
     </header>
 
     <div class="blocks" id="blocks"></div>
@@ -138,6 +147,10 @@
       </div>
       <div class="ed-tabs" id="ed-tabs" role="tablist"></div>
     </header>
+    <div class="ed-routine-meta">
+      <label class="ed-routine-name"><span>Nombre de la rutina</span><input id="ed-routine-name" maxlength="100" autocomplete="off" placeholder="Nueva rutina"></label>
+      <label class="ed-activate-option"><input type="checkbox" id="ed-activate-routine">Usar como rutina activa</label>
+    </div>
     <div class="ed-body" id="ed-body"></div>
     <label class="cycle-option"><input type="checkbox" id="ed-new-cycle">Iniciar nuevo ciclo con esta rutina</label>
   </section>
@@ -145,56 +158,50 @@
   <!-- ============ AJUSTES ============ -->
   <section class="view" id="view-settings">
     <div class="page">
-      <header class="section-masthead"><div><span class="eyebrow">REAWAKEN</span><h1 class="title-xl">Ajustes</h1></div><span class="section-index" aria-hidden="true">04</span></header>
+      <header class="section-masthead"><div><span class="eyebrow">REAWAKEN</span><h1 class="title-xl">Ajustes</h1></div></header>
       <button class="settings-profile" id="settings-profile" aria-label="Editar perfil" title="Editar perfil"></button>
-      <div style="margin-top:20px" id="storage-notice"></div>
 
-      <h2 class="section-title">Funciones</h2>
-      <div class="list-card">
-        <button class="list-row" id="btn-functions"><span class="lr-body"><strong>Guía rápida</strong><small>Las funciones en pocas palabras</small></span><span aria-hidden="true">›</span></button>
-      </div>
-
-      <h2 class="section-title">Apariencia</h2>
+      <h2 class="section-title">Preferencias</h2>
       <div class="list-card">
         <div class="list-row">
           <div class="lr-icon" style="background:color-mix(in srgb, var(--brand) 22%, transparent);color:var(--brand)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
           </div>
-          <div class="lr-body"><strong>Tema</strong><small>Cómo se ve la app</small></div>
+          <div class="lr-body"><strong>Tema</strong></div>
         </div>
-        <div class="seg" id="theme-seg">
+        <div class="seg" id="theme-seg" role="group" aria-label="Tema de la app">
           <button data-theme-opt="auto">Automático</button>
           <button data-theme-opt="dark">Oscuro</button>
           <button data-theme-opt="light">Claro</button>
         </div>
+        <label class="list-row" for="multimedia-audio"><span class="lr-body"><strong>Sonido en modo silencio</strong><small id="audio-support"></small></span><input id="multimedia-audio" type="checkbox" role="switch" /></label>
+        <button class="list-row" id="btn-test-audio"><span class="lr-body"><strong>Probar sonido de ejercicios</strong><small>Volumen multimedia del dispositivo</small></span><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg></button>
       </div>
 
-      <h2 class="section-title">Mi rutina</h2>
+      <h2 class="section-title">Entrenamiento</h2>
       <div class="list-card">
+        <button class="list-row" id="btn-training-preferences"><div class="lr-body"><strong>Descanso y pantalla</strong><small id="training-preferences-summary">45 s por defecto</small></div><span aria-hidden="true">›</span></button>
         <button class="list-row" id="btn-edit-routine">
-          <div class="lr-icon" style="background:color-mix(in srgb, #BF5AF2 22%, transparent);color:#BF5AF2">
+          <div class="lr-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg>
           </div>
-          <div class="lr-body"><strong>Editar rutina actual</strong><small id="routine-summary">—</small></div>
+          <div class="lr-body"><strong>Rutinas</strong><small id="routine-summary">—</small></div>
           <svg class="chev" width="8" height="14" viewBox="0 0 8 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 1l6 6-6 6"/></svg>
         </button>
-        <button class="list-row" id="btn-import-routine">
-          <div class="lr-icon" style="background:color-mix(in srgb, #FF9F0A 22%, transparent);color:#FF9F0A">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16M4 12h16M4 19h10"/></svg>
+        <button class="list-row" id="btn-exercise-library">
+          <div class="lr-icon" style="background:color-mix(in srgb, var(--brand) 18%, transparent);color:var(--brand)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16M4 15h16M7 6v12M17 6v12"/><path d="M2 9h2M20 9h2M2 15h2M20 15h2"/></svg>
           </div>
-          <div class="lr-body"><strong>Importar rutina nueva</strong><small>Carga el PDF o pega el plan del coach</small></div>
+          <div class="lr-body"><strong>Ejercicios</strong><small id="exercise-summary">—</small></div>
           <svg class="chev" width="8" height="14" viewBox="0 0 8 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 1l6 6-6 6"/></svg>
         </button>
-        <button class="list-row" id="btn-reset-routine">
-          <div class="lr-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 109-9 9 9 0 00-6.4 2.7L3 8"/><path d="M3 3v5h5"/></svg></div>
-          <div class="lr-body"><strong>Restaurar rutina original</strong><small>La del PDF de Anderson</small></div>
-        </button>
+        <button class="list-row" id="btn-routine-date"><div class="lr-body"><strong>Fecha de cambio de rutina</strong><small id="routine-change"></small></div><span aria-hidden="true">›</span></button>
+        <button class="list-row" id="btn-settings-inbody"><div class="lr-body"><strong>Registrar InBody</strong><small id="inbody-schedule">Cada día 1</small></div><span aria-hidden="true">+</span></button>
       </div>
 
-      <h2 class="section-title">Sincronización</h2>
+      <h2 class="section-title">Cuenta y respaldo</h2>
       <div id="sync-slot"></div>
 
-      <h2 class="section-title">Respaldo</h2>
       <div class="list-card">
         <button class="list-row" id="btn-export">
           <div class="lr-icon" style="background:color-mix(in srgb, #30D158 22%, transparent);color:#30D158">
@@ -213,6 +220,7 @@
       </div>
 
       <h2 class="section-title">Almacenamiento</h2>
+      <div id="storage-notice"></div>
       <div class="list-card">
         <div class="list-row">
           <div class="lr-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg></div>
@@ -222,23 +230,17 @@
           <div class="lr-icon" style="background:color-mix(in srgb, #FF453A 20%, transparent);color:#FF453A">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
           </div>
-          <div class="lr-body"><strong style="color:#FF453A">Borrar todo</strong><small>Elimina sesiones y mediciones, también al sincronizar</small></div>
+          <div class="lr-body"><strong class="settings-danger">Borrar sesiones y mediciones</strong><small>También se eliminan de la nube al sincronizar</small></div>
         </button>
       </div>
 
-      <h2 class="section-title">Plan</h2>
+      <h2 class="section-title">Ayuda</h2>
       <div class="list-card">
-        <button class="list-row" id="btn-routine-date"><div class="lr-body"><strong>Cambio de rutina</strong><small id="routine-change"></small></div><span aria-hidden="true">›</span></button>
-        <button class="list-row" id="btn-settings-inbody"><div class="lr-body"><strong>Nuevo InBody</strong><small id="inbody-schedule">Cada día 1</small></div><span aria-hidden="true">+</span></button>
+        <button class="list-row" id="btn-personal-setup"><span class="lr-body"><strong>Configurar entrenamiento</strong><small>Perfil, descansos y rutinas</small></span><span aria-hidden="true">›</span></button>
+        <button class="list-row" id="btn-functions"><span class="lr-body"><strong>Guía rápida</strong></span><span aria-hidden="true">›</span></button>
       </div>
 
-      <h2 class="section-title">Sonido de ejercicios</h2>
-      <div class="list-card">
-        <label class="list-row" for="multimedia-audio"><span class="lr-body"><strong>Audio multimedia en silencio</strong><small id="audio-support"></small></span><input id="multimedia-audio" type="checkbox" role="switch" /></label>
-        <button class="list-row" id="btn-test-audio"><span class="lr-body"><strong>Probar los tres tonos</strong><small>Volumen multimedia del dispositivo</small></span><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg></button>
-      </div>
-
-      <div class="app-build"><span id="app-version">REAWAKEN · 2.8.9</span><button id="btn-check-update" class="btn btn-ghost">Buscar actualización</button><small id="update-status" role="status"></small></div>
+      <div class="app-build"><span id="app-version">REAWAKEN · 2.9.2</span><button id="btn-check-update" class="btn btn-ghost">Buscar actualización</button><small id="update-status" role="status"></small></div>
     </div>
   </section>
 
@@ -276,8 +278,8 @@
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <!-- Tab bar -->
-<nav class="tabbar" id="tabbar">
-  <button class="tab active" data-view="home">
+<nav class="tabbar" id="tabbar" aria-label="Navegación principal" inert hidden>
+  <button class="tab active" data-view="home" aria-current="page">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8M5 9.5V20h14V9.5"/></svg>
     <span>Hoy</span>
   </button>
@@ -297,6 +299,40 @@
 
 <input type="file" id="file-input" accept="application/json,.json" hidden />
 
-<script type="module" src="js/app.js?v=2.4.0"></script>
+<script>
+  (function () {
+    var root = document.documentElement;
+    var launch = document.getElementById('launch-screen');
+    var status = document.getElementById('launch-status');
+    var retry = document.getElementById('launch-retry');
+    var settled = false;
+    var watchdog = setTimeout(function () {
+      if (settled || root.dataset.boot !== 'loading') return;
+      status.textContent = 'Está tardando más de lo esperado. Puedes reintentar sin borrar tus datos.';
+      retry.hidden = false;
+    }, 8000);
+    retry.onclick = function () { window.location.reload(); };
+    document.addEventListener('reawaken-boot-complete', function () {
+      settled = true;
+      clearTimeout(watchdog);
+    }, { once: true });
+    function assetFailure() {
+      if (settled) return;
+      clearTimeout(watchdog);
+      root.dataset.bootAssetError = 'true';
+      root.dataset.boot = 'blocked';
+      launch.dataset.state = 'error';
+      status.setAttribute('role', 'alert');
+      status.textContent = 'No se pudieron cargar los archivos de la app. Revisa la conexión y vuelve a intentar. Tus datos siguen aquí.';
+      retry.hidden = false;
+    }
+    if (root.dataset.styleError === 'true') assetFailure();
+    window.addEventListener('error', function (event) {
+      if (!event.target || !['app-script', 'app-style'].includes(event.target.id)) return;
+      assetFailure();
+    }, true);
+  })();
+</script>
+<script id="app-script" type="module" src="js/app.js?v=2.9.2"></script>
 </body>
 </html>

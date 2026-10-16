@@ -2,6 +2,7 @@
 <html lang="es">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
 <title>REAWAKEN - pruebas locales</title>
 <h1>Pruebas de inteligencia local</h1>
 <pre id="result">Ejecutando...</pre>
@@ -9,11 +10,17 @@
   import { runIntelligenceTests } from './intelligence.test.js';
   import { runProgressTests } from './progress.test.js';
   import { runRoutineImportTests } from './routine-import.test.js';
+  import { runExerciseLibraryTests } from './exercise-library.test.js';
+  import { runSessionHistoryTests } from './session-history.test.js';
+  import { runPersonalToolsTests } from './personal-tools.test.js';
   const output = document.querySelector('#result');
   try {
     const intelligence = runIntelligenceTests(), progress = runProgressTests();
     const routineImport = await runRoutineImportTests();
-    output.textContent = JSON.stringify({ checks: intelligence.checks + progress.checks + routineImport.checks, result: 'PASS', intelligence, progress, routineImport }, null, 2);
+    const exerciseLibrary = runExerciseLibraryTests();
+    const sessionHistory = runSessionHistoryTests();
+    const personalTools = runPersonalToolsTests();
+    output.textContent = JSON.stringify({ checks: intelligence.checks + progress.checks + routineImport.checks + exerciseLibrary.checks + sessionHistory.checks + personalTools.checks, result: 'PASS', intelligence, progress, routineImport, exerciseLibrary, sessionHistory, personalTools }, null, 2);
     document.documentElement.dataset.result = 'pass';
   } catch (error) {
     output.textContent = error.stack;

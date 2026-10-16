@@ -14,7 +14,7 @@ export function repPrescription(movement) {
 }
 
 export function repTarget(movement) {
-  if (/fallo|lentas|rapidas|mant|tramo|parcial|isometr|bajando|unilateral|simultaneo|\+/.test(normalizeExercise(`${movement.name} ${movement.note || ''}`))) return null;
+  if (/fallo|lentas|rapidas|mant|tramo|parcial|isometr|bajando|simultaneo|\+/.test(normalizeExercise(`${movement.name} ${movement.note || ''}`))) return null;
   const target = repPrescription(movement);
   return target?.max <= 30 ? target : null;
 }
@@ -45,8 +45,10 @@ export function machineAlternative(movement) {
 }
 
 export function setRecord(session, movementId, index) {
+  const value = session.entries?.[movementId]?.[index];
+  if (typeof value !== 'string' || !/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(value.trim())) return null;
   const record = session.entries?._training?.sets?.[movementId]?.[index];
-  return record && Number(record.load) === Number(session.entries?.[movementId]?.[index]) && isRecorded(session.entries?.[movementId]?.[index]) ? record : null;
+  return record && Number(record.load) === Number(value) && isRecorded(value) ? record : null;
 }
 
 export function equipmentChoice(session, movement) {
@@ -55,6 +57,34 @@ export function equipmentChoice(session, movement) {
 
 export function comparisonKey(movement, choice) {
   return JSON.stringify([normalizeExercise(movement.name), movement.reps, normalizeExercise(movement.note), choice.variant, normalizeExercise(choice.label), choice.unit, assisted(movement)]);
+}
+
+export function isComparableSetRecord(record) {
+  return Boolean(record && Number.isFinite(record.load) && record.load >= 0 &&
+    Number.isInteger(record.reps) && record.reps >= 1 && record.reps <= 99 &&
+    ['kg', 'lb', 'escala'].includes(record.unit) &&
+    ['original', 'alternative'].includes(record.variant) &&
+    typeof record.label === 'string' && record.label.trim() !== '');
+}
+
+export function personalBestForSet(session, movement, index, sessions, dayFor) {
+  if (!repTarget(movement) || assisted(movement)) return null;
+  const current = setRecord(session, movement.id, index);
+  if (!isComparableSetRecord(current)) return null;
+  const key = comparisonKey(movement, current);
+  let best = null;
+  for (const previous of sessions) {
+    if (previous.id === session.id || previous.deletedAt || !previous.finishedAt ||
+        previous.startedAt >= session.startedAt || !previous.routineSnapshot) continue;
+    const original = dayFor(previous)?.blocks.flatMap(block => block.movements).find(item => item.id === movement.id);
+    if (!original || !repTarget(original)) continue;
+    for (let offset = 0; offset < (previous.entries?.[movement.id]?.length || 0); offset++) {
+      const record = setRecord(previous, movement.id, offset);
+      if (!isComparableSetRecord(record) || record.reps !== current.reps || comparisonKey(original, record) !== key) continue;
+      if (best === null || record.load > best) best = record.load;
+    }
+  }
+  return best;
 }
 
 export function trackedSets(sessions, dayFor) {

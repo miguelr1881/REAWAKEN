@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title>REAWAKEN</title>
+  <rect width="64" height="64" rx="14" fill="#0c0d0f"/>
+  <path d="M14 42 25 31l7 7 18-18" fill="none" stroke="#7C5CFF" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M14 51 25 40l7 7 18-18" fill="none" stroke="#5B3DF5" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity=".72"/>
+</svg>

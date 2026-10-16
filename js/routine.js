@@ -1,27 +1,21 @@
-// Rutina extraída del plan de entrenamiento (Entrenador: Anderson).
+// Plantilla histórica anónima: conserva los IDs usados por instalaciones antiguas.
 // Notación original de la columna "Reps":
 //   "_"  separa ejercicios distintos dentro del mismo bloque (superserie)
 //   "+"  indica repeticiones distintas dentro de la misma serie (ej. 10+12+15)
 
 export const PROFILE = {
-  name: 'Miguel J Tung',
-  coach: 'Anderson',
-  height: 183,
-  // El Día 3 se hizo el 03/09/2026 fuera de la app, así que la rotación arranca en el 4.
+  name: '',
+  coach: '',
   firstDayId: 'd4',
-  startDate: '2026-05-04',
-  reviewDate: '2026-08-16',
-  routineChangeDate: '2026-10-20',
+  routineChangeDate: '',
   daysPerWeek: 5,
-  goals: 'Bajar % de grasa, mantener músculo, rapidez y potencia',
-  sport: 'Fútbol',
-  weeklyNote: 'Cada semana subir pesos y aumentar 3 min al cardio.'
+  sport: ''
 };
 
 /**
  * kind: 'weight' -> input de peso por serie | 'check' -> palomita por serie
- * Esta es la rutina de arranque (la del PDF del coach). La rutina activa se
- * guarda en IndexedDB y se puede editar o reemplazar desde Ajustes.
+ * Solo compatibilidad histórica; no se siembra en instalaciones nuevas.
+ * La rutina activa del usuario se conserva en IndexedDB.
  */
 export const DEFAULT_ROUTINE = [
   {

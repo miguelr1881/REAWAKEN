@@ -1,17 +1,23 @@
 import { DEFAULT_ROUTINE, PROFILE, totalSets } from './routine.js';
 import { db, requestPersistence, storageEstimate } from './db.js';
+import { prepareBackup, backupActiveRoutines } from './backup.js';
 import { INBODY_FIELDS, parseInBody, formatValue, consistency, fieldMeta } from './inbody.js';
 import { parseRoutineText, sanitizeRoutine, DAY_ACCENTS } from './routine-parser.js';
 import { extractRoutinePdf } from './routine-pdf.js';
+import { EXERCISE_CATALOG } from './exercise-catalog.js';
 import * as sync from './sync.js';
 import { MUSCLE_GROUPS, exerciseFocus, exerciseGroups, imageSearchUrl, muscleAtlas, dayFocus } from './exercise-info.js';
-import { normalizeProfile, validProfileDate, monthlyInBody } from './profile.js';
+import { EMPTY_PROFILE, normalizeProfile, validProfileDate, monthlyInBody, validatePersonalProfile } from './profile.js';
 import { sessionDuration, trainingAchievements } from './progress.js';
 import { enterView, resizeContent, disclose, bindDisclosures } from './motion.js';
 import { createTrainingUI } from './training-ui.js';
-import { assisted, machineAlternative, equipmentChoice, setRecord, comparisonKey } from './intelligence.js';
+import { equipmentChoice, setRecord, comparisonKey, personalBestForSet, normalizeExercise } from './intelligence.js';
+import { correctSessionWeight, movementLoadHistory } from './session-history.js';
+import { trainingPreferences, createScreenWakeLock } from './training-preferences.js';
+import { sessionPersonalRecords } from './personal-records.js';
+import { generateRoutine } from './routine-generator.js';
 
-const APP_VERSION = '2.8.9';
+const APP_VERSION = '2.9.2';
 
 /* ============================== Estado ============================== */
 
@@ -19,17 +25,32 @@ const state = {
   view: 'home',
   routine: DEFAULT_ROUTINE,   // rutina activa
   routineId: null,
+  routines: [],               // catálogo local de rutinas guardadas
+  routineRevisions: new Map(),
+  routineConflict: false,
+  activeRoutineId: null,
+  exercises: [],
   profile: normalizeProfile(),
+  personalProfile: undefined,
   session: null,              // sesión activa (finishedAt === null)
   sessions: [],               // historial completo
   measures: [],               // mediciones InBody
   draft: null,                // rutina en edición
   edDay: 0,                   // día visible en el editor
   edDirty: false,             // el borrador tiene cambios sin guardar
+  draftRoutineId: null,
+  draftBaseline: null,
+  draftGeneration: null,
+  draftRoutineName: '',
+  draftActivate: true,
+  draftSource: 'manual',
   theme: 'auto',
   chartMetric: 'pbf',
   viewScroll: {},
   restSeconds: 45,
+  keepScreenAwake: false,
+  wakeLockStatus: 'inactive',
+  sessionSaveStatus: 'saved',
   multimediaAudio: false,
   rest: { id: null, left: 0, total: 45 }
 };
@@ -57,9 +78,18 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => (
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Date.now() + '-' + Math.random().toString(36).slice(2));
 
+const screenWakeLock = createScreenWakeLock(
+  () => state.keepScreenAwake && state.view === 'workout' && Boolean(state.session),
+  status => {
+    state.wakeLockStatus = status;
+    if ($('#wake-support')) $('#wake-support').textContent = wakeLockDescription();
+  }
+);
+
 const trainingUI = createTrainingUI({
   state, dayFor: sessionDay, esc, openSheet, closeSheet, saveSession, startRest,
   onSaveError: warnSessionSave,
+  onRecordChange: movementId => updatePersonalRecords(movementId),
   redraw: () => { const scroll = window.scrollY; renderBlocks(sessionDay(state.session)); updateWorkoutHeader(); window.scrollTo(0, scroll); },
   showSession: showSessionDetail
 });
@@ -76,18 +106,39 @@ function fmtDuration(ms) {
   return `${Math.floor(min / 60)} h ${min % 60} min`;
 }
 
+function toastCopy(msg) {
+  const copy = document.createElement('span');
+  copy.className = 'toast-copy';
+  const parts = String(msg).split(/\s+·\s+/);
+  if (parts.length > 1) {
+    const title = document.createElement('strong');
+    title.textContent = parts.shift();
+    const detail = document.createElement('span');
+    detail.className = 'toast-text';
+    detail.textContent = parts.join(' · ');
+    copy.append(title, detail);
+  } else {
+    const text = document.createElement('span');
+    text.className = 'toast-text';
+    text.textContent = msg;
+    copy.append(text);
+  }
+  return copy;
+}
+
 /** `action` opcional: `{ label, fn }` pinta un botón dentro del toast (deshacer). */
-function toast(msg, action = null, duration = action ? 10000 : 6500, dismissible = false) {
+function toast(msg, action = null, duration = action ? 10000 : 6500, dismissible = true) {
   const el = $('#toast');
   const dismiss = () => {
     clearTimeout(el._t);
     el.inert = true;
-    el.classList.remove('show');
+    el.classList.remove('show', 'has-action', 'dismissible');
     el.replaceChildren();
   };
   el.inert = false;
-  el.textContent = msg;
+  el.replaceChildren(toastCopy(msg));
   el.classList.toggle('has-action', !!action);
+  el.classList.toggle('dismissible', dismissible);
   if (action) {
     const btn = document.createElement('button');
     btn.className = 'toast-action';
@@ -98,7 +149,7 @@ function toast(msg, action = null, duration = action ? 10000 : 6500, dismissible
   if (dismissible) {
     const close = document.createElement('button');
     close.className = 'toast-close';
-    close.textContent = '×';
+    close.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
     close.setAttribute('aria-label', 'Cerrar aviso');
     close.title = 'Cerrar aviso';
     close.onclick = dismiss;
@@ -112,6 +163,12 @@ function toast(msg, action = null, duration = action ? 10000 : 6500, dismissible
 function haptic() {
   // iOS ignora vibrate; el feedback visual va por CSS. Se mantiene por compatibilidad Android.
   navigator.vibrate?.(8);
+}
+
+function freezeControls(controls) {
+  const previous = controls.map(control => control.disabled);
+  controls.forEach(control => { control.disabled = true; });
+  return () => controls.forEach((control, index) => { control.disabled = previous[index]; });
 }
 
 function isStandalone() {
@@ -131,12 +188,37 @@ function applyTheme(pref) {
   $('#meta-status-bar').setAttribute('content', light ? 'default' : 'black-translucent');
   // Espejo en localStorage para poder aplicar el tema antes de pintar en el siguiente arranque.
   try { localStorage.setItem('theme', pref); } catch { /* modo privado */ }
-  $$('#theme-seg button').forEach(b => b.classList.toggle('on', b.dataset.themeOpt === pref));
+  $$('#theme-seg button').forEach(button => {
+    const selected = button.dataset.themeOpt === pref;
+    button.classList.toggle('on', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  });
 }
 
+let confirmedTheme = 'auto', themeRevision = 0, themeQueue = Promise.resolve();
+
 async function setTheme(pref) {
+  if (!['auto', 'dark', 'light'].includes(pref)) {
+    console.error('Preferencia de tema no válida.');
+    toast('No se pudo aplicar ese tema.');
+    return false;
+  }
+  const revision = ++themeRevision;
   applyTheme(pref);
-  await db.setMeta('theme', pref);
+  const writing = themeQueue.then(() => db.setMeta('theme', pref));
+  themeQueue = writing.then(() => undefined, () => undefined);
+  try {
+    await writing;
+    confirmedTheme = pref;
+    return true;
+  } catch (error) {
+    console.error('No se pudo guardar el tema.', error);
+    if (revision === themeRevision) {
+      applyTheme(confirmedTheme);
+      toast('No se pudo guardar el tema. Se conservó el anterior; vuelve a intentarlo.');
+    }
+    return false;
+  }
 }
 
 prefersLight.addEventListener('change', () => { if (state.theme === 'auto') applyTheme('auto'); });
@@ -156,21 +238,18 @@ function newSession(dayId) {
   return { id: uid(), dayId, routineSnapshot: JSON.parse(JSON.stringify(day)), startedAt: Date.now(), finishedAt: null, notes: '', entries };
 }
 
-/** Mejor peso registrado en este ejercicio, para marcar récords. */
-function personalBest(movementId, excludeId) {
+function updatePersonalRecords(movementId, celebrate = false) {
   const movement = sessionDay(state.session)?.blocks.flatMap(block => block.movements).find(item => item.id === movementId);
-  if (!movement || assisted(movement) || machineAlternative(movement) || state.session.entries?._training) return null;
-  let best = null;
-  for (const s of state.sessions) {
-    if (!s.finishedAt || s.id === excludeId || s.entries?._training) continue;
-    const original = sessionDay(s)?.blocks.flatMap(block => block.movements).find(item => item.id === movementId);
-    if (original?.name !== movement.name || original?.reps !== movement.reps) continue;
-    for (const v of s.entries?.[movementId] || []) {
-      const n = parseFloat(v);
-      if (Number.isFinite(n) && (best === null || n > best)) best = n;
-    }
+  if (!movement) return;
+  for (const cell of $$('#blocks .set[data-mid]').filter(item => item.dataset.mid === movementId)) {
+    const index = Number(cell.dataset.idx);
+    const best = personalBestForSet(state.session, movement, index, state.sessions, sessionDay);
+    const value = state.session.entries[movementId]?.[index];
+    const isPr = best !== null && recordedSet(value) && Number(value) > best;
+    if (celebrate && isPr && !cell.classList.contains('pr')) toast(`¡Récord! Tu mejor con estas reps era ${best}`);
+    cell.dataset.best = best ?? '';
+    cell.classList.toggle('pr', isPr);
   }
-  return best;
 }
 
 function sessionProgress(session) {
@@ -211,22 +290,54 @@ function ensureEntries(session, day) {
 }
 
 let saveTimer = null;
-function warnSessionSave() {
+function warnSessionSave(error) {
+  console.error('No se pudo guardar el entrenamiento.', error);
   toast('No se pudo guardar. Tus cambios siguen en pantalla; vuelve a intentarlo antes de cerrar la app.');
 }
 
+let saveQueue = Promise.resolve(), saveRevision = 0, discardingSessionId = null;
+function updateSaveStatus() {
+  const label = $('#session-save-status');
+  if (!label) return;
+  const cloud = sync.status();
+  const text = state.sessionSaveStatus === 'saving' ? 'Guardando…' : state.sessionSaveStatus === 'error' ? 'Sin guardar' :
+    !navigator.onLine ? 'Guardado aquí · sin conexión' :
+    cloud.configured && cloud.signedIn ? 'Guardado aquí · nube pendiente' : 'Guardado en este dispositivo';
+  if (label.textContent !== text) label.textContent = text;
+  $('#workout-save').dataset.state = state.sessionSaveStatus;
+  $('#retry-session-save').hidden = state.sessionSaveStatus !== 'error';
+  const summary = $('#summary-save-status');
+  if (summary) summary.textContent = cloud.syncing ? 'Guardado aquí · sincronizando registros…' :
+    cloud.error ? 'Guardado aquí · revisa la sincronización en Ajustes.' : 'Guardado en este dispositivo.';
+}
+
 function saveSession(immediate = false) {
-  if (!state.session) return;
+  if (!state.session || state.session.id === discardingSessionId) return;
   clearTimeout(saveTimer);
   const session = state.session;
+  const revision = ++saveRevision;
+  state.sessionSaveStatus = 'saving';
+  updateSaveStatus();
   const doSave = async () => {
-    await db.putSession(session);
-    const i = state.sessions.findIndex(s => s.id === session.id);
-    if (i >= 0) state.sessions[i] = { ...session };
-    else state.sessions.push({ ...session });
+    try {
+      const snapshot = structuredClone(session);
+      const writing = saveQueue.then(() => db.putSession(snapshot));
+      // La cola continúa tras un fallo; writing conserva el rechazo para el formulario.
+      saveQueue = writing.then(() => undefined, () => undefined);
+      await writing;
+      const i = state.sessions.findIndex(s => s.id === snapshot.id);
+      if (i >= 0) state.sessions[i] = snapshot;
+      else state.sessions.push(snapshot);
+      if (revision === saveRevision) state.sessionSaveStatus = 'saved';
+    } catch (error) {
+      if (revision === saveRevision) state.sessionSaveStatus = 'error';
+      throw error;
+    } finally {
+      updateSaveStatus();
+    }
   };
   if (immediate) return doSave();
-  saveTimer = setTimeout(() => doSave().catch(() => toast('No se pudo guardar. Revisa el almacenamiento.')), 350);
+  saveTimer = setTimeout(() => doSave().catch(warnSessionSave), 350);
 }
 
 /** Última sesión terminada que registró este movimiento, para mostrar referencia. */
@@ -260,13 +371,21 @@ function setView(name) {
   state.view = name;
   const fullscreen = name === 'workout' || name === 'editor';
   $$('.view').forEach(v => v.classList.toggle('active', v.id === `view-${name}`));
-  $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === name));
+  $$('.tab').forEach((tab, index) => {
+    const selected = tab.dataset.view === name;
+    tab.classList.toggle('active', selected);
+    if (selected) {
+      tab.setAttribute('aria-current', 'page');
+      $('#tabbar').style.setProperty('--nav-index', index);
+    } else tab.removeAttribute('aria-current');
+  });
   $('#tabbar').style.display = fullscreen ? 'none' : 'flex';
   document.body.classList.toggle('in-workout', fullscreen);
   closeSheet();
   if (name !== 'workout') hideRest();
   window.scrollTo({ top: name === 'workout' ? state.workoutScroll || 0 : state.viewScroll[name] || 0 });
   if (name !== previousView) enterView($(`#view-${name}`), 0);
+  screenWakeLock.update();
 }
 
 /* ---------- Home ---------- */
@@ -275,7 +394,9 @@ function renderHome() {
   $('#today-date').textContent = fmtDate(Date.now());
 
   const h = new Date().getHours();
-  $('#greeting').textContent = `${h < 12 ? 'Buenos días' : h < 19 ? 'Buenas tardes' : 'Buenas noches'}, ${state.profile.name.split(/\s+/)[0]}`;
+  const greeting = h < 12 ? 'Buenos días' : h < 19 ? 'Buenas tardes' : 'Buenas noches';
+  const firstName = state.profile.name.trim().split(/\s+/)[0];
+  $('#greeting').textContent = firstName ? `${greeting}, ${firstName}` : greeting;
   $('#coach-credit').textContent = [state.profile.sport, state.profile.coach ? `Coach: ${state.profile.coach}` : ''].filter(Boolean).join(' · ');
   renderInBodyReminder();
 
@@ -286,7 +407,8 @@ function renderHome() {
   $('#stat-total').textContent = finished.length;
   $('#stat-streak').textContent = calcWeekStreak(finished);
   $('#stat-streak').parentElement.title = `Racha: semanas con al menos ${state.profile.daysPerWeek} sesiones`;
-  $('#routine-heading').textContent = `Tu rutina · ${state.routine.length} días`;
+  const activeName = activeRoutineRecord()?.name;
+  $('#routine-heading').textContent = `${activeName || 'Tu rutina'} · ${plural(state.routine.length, 'día', 'días')}`;
   const today = new Date().toDateString();
   $('#week-strip').innerHTML = ['L', 'K', 'M', 'J', 'V', 'S', 'D'].map((label, index) => {
     const date = new Date(weekStart(Date.now()));
@@ -326,8 +448,10 @@ function renderHome() {
       <div class="next-anatomy" aria-label="Enfoque muscular orientativo">${muscleAtlas(focus)}</div></div>
       ${focus.length ? `<div class="next-focus">${focus.slice(0, 3).map(group => `<span>${MUSCLE_GROUPS[group]}</span>`).join('')}</div>` : ''}
       <button class="btn btn-primary" id="btn-start-next"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>Empezar entrenamiento</button>
-    </section>` : '';
+    </section>` : !state.session && !next ? `<section class="next-workout"><span class="eyebrow">${state.routineConflict ? 'Revisar biblioteca' : 'Empieza con tu plan'}</span><h2>${state.routineConflict ? 'Elige tu rutina activa' : 'Importa la rutina de tu gym'}</h2><p>${state.routineConflict ? 'Hay más de un plan activo. No elegimos por ti ni cambiamos tu historial.' : 'Carga el PDF o pega el texto de tu coach. Sus ejercicios quedarán disponibles para crear tus próximas rutinas.'}</p>${!state.routineConflict ? '<button class="btn btn-primary" id="home-import">Importar PDF o texto</button>' : ''}<button class="btn ${state.routineConflict ? 'btn-primary' : 'btn-ghost'}" id="home-setup">${state.routineConflict ? 'Elegir rutina' : 'Perfil y ajustes'}</button></section>` : '';
   if ($('#btn-start-next')) $('#btn-start-next').onclick = () => startOrOpen(nextDayId);
+  if ($('#home-import')) $('#home-import').onclick = openImportRoutine;
+  if ($('#home-setup')) $('#home-setup').onclick = state.routineConflict ? openRoutineCatalog : openPersonalSetup;
 
   renderRoutineAlert();
 
@@ -372,6 +496,7 @@ function renderHome() {
 /** Siguiente día de la rotación según el último entrenamiento cerrado. */
 function suggestNextDay(finished) {
   if (state.session) return state.session.dayId;
+  if (!state.routine.length) return null;
   const last = finished.slice().sort((a, b) => b.startedAt - a.startedAt)[0];
   if (!last) return dayById(PROFILE.firstDayId)?.id || state.routine[0]?.id;
   const i = state.routine.findIndex(d => d.id === last.dayId);
@@ -444,7 +569,7 @@ function openWorkout(dayId) {
   const day = state.session?.dayId === dayId ? sessionDay(state.session) : dayById(dayId);
   if (!day) return toast('Ese día ya no existe en tu rutina');
   if (!state.session.routineSnapshot) state.session.routineSnapshot = JSON.parse(JSON.stringify(day));
-  if (ensureEntries(state.session, day)) saveSession(true);
+  if (ensureEntries(state.session, day)) saveSession(true)?.catch(warnSessionSave);
   $('#wh-name').textContent = `${day.label} · ${day.title}`;
   renderBlocks(day);
   updateWorkoutHeader();
@@ -463,11 +588,11 @@ function renderBlocks(day) {
     const movesHtml = block.movements.map(mv => {
       const vals = s.entries[mv.id] || [];
       const last = lastPerformance(mv.id, s.id);
-      const best = mv.kind === 'weight' ? personalBest(mv.id, s.id) : null;
       const setsHtml = Array.from({ length: block.sets }, (_, i) => {
         if (mv.kind === 'weight') {
           const v = typeof vals[i] === 'string' ? vals[i] : '';
           const ph = last?.values[i] ?? last?.values.find(value => value !== null) ?? '–';
+          const best = personalBestForSet(s, mv, i, state.sessions, sessionDay);
           const isPr = best !== null && parseFloat(v) > best;
           return `<div class="set${v ? ' filled' : ''}${isPr ? ' pr' : ''}" data-mid="${mv.id}" data-idx="${i}" data-best="${best ?? ''}">
               <span class="n">${i + 1}</span>
@@ -556,12 +681,10 @@ function bindSetHandlers(day) {
       trainingUI.updateInlineRecord(state.session, movement, +cell.dataset.idx, cell.querySelector('[data-reps]')?.value);
       cell.classList.toggle('filled', v.trim() !== '');
 
-      const best = parseFloat(cell.dataset.best);
-      const isPr = Number.isFinite(best) && parseFloat(v) > best;
-      if (isPr && !cell.classList.contains('pr')) toast(`¡Récord! Tu mejor era ${best}`);
-      cell.classList.toggle('pr', isPr);
+      updatePersonalRecords(cell.dataset.mid, true);
 
       saveSession();
+      trainingUI.refreshAdvice(day, cell.dataset.mid);
       updateWorkoutHeader();
       updateBlockState(findBlock(day, cell.dataset.mid));
     });
@@ -619,6 +742,7 @@ function updateWorkoutHeader() {
   $('#wh-progress').style.width = `${p.pct}%`;
   const mins = fmtDuration(Date.now() - state.session.startedAt);
   $('#wh-sub').textContent = `${p.done}/${p.total} series · ${p.pct}% · ${mins}`;
+  updateSaveStatus();
 }
 
 /* ---------- Temporizador (descanso y ejercicios cronometrados) ---------- */
@@ -800,6 +924,29 @@ function historyCalendar(finished) {
   </section>`;
 }
 
+function annualActivityHtml(finished) {
+  const year = historyState.activityYear || new Date().getFullYear();
+  const sessions = finished.filter(session => new Date(session.startedAt).getFullYear() === year);
+  const counts = new Map();
+  for (const session of sessions) {
+    const key = dateKey(session.startedAt);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return `<details class="annual-activity" id="annual-activity" ${historyState.activityOpen ? 'open' : ''}><summary>Tu año de entrenamiento <span>${plural(sessions.length, 'sesión', 'sesiones')}</span></summary>
+    <div><div class="activity-year-controls"><button class="icon-btn" data-activity-step="-1" aria-label="Año anterior" ${year <= 1900 ? 'disabled' : ''}>‹</button><label><span class="eyebrow">Actividad anual</span><input id="activity-year" type="number" min="1900" max="2100" step="1" value="${year}" aria-label="Año de actividad"></label><button class="icon-btn" data-activity-step="1" aria-label="Año siguiente" ${year >= 2100 ? 'disabled' : ''}>›</button></div>
+    <p class="training-caption">${plural(counts.size, 'día activo', 'días activos')}. Toca un mes para abrir sus registros.</p><div class="activity-months">${Array.from({ length: 12 }, (_, month) => {
+      const first = new Date(year, month, 1, 12), days = new Date(year, month + 1, 0).getDate();
+      const prefix = `${year}-${String(month + 1).padStart(2, '0')}`;
+      const total = sessions.filter(session => new Date(session.startedAt).getMonth() === month).length;
+      const cells = Array.from({ length: (first.getDay() + 6) % 7 }, () => '<i class="activity-spacer"></i>').join('') +
+        Array.from({ length: days }, (_, index) => {
+          const key = `${prefix}-${String(index + 1).padStart(2, '0')}`;
+          return `<i data-activity-day="${key}" data-count="${Math.min(3, counts.get(key) || 0)}"></i>`;
+        }).join('');
+      return `<button class="activity-month" data-activity-month="${prefix}" aria-label="${esc(fmtDate(first, { month: 'long', year: 'numeric' }))}, ${plural(total, 'sesión', 'sesiones')}"><strong>${esc(fmtDate(first, { month: 'short' }))}</strong><span class="activity-dots" aria-hidden="true">${cells}</span><small>${plural(total, 'sesión', 'sesiones')}</small></button>`;
+    }).join('')}</div></div></details>`;
+}
+
 function renderHistory() {
   const finished = state.sessions.filter(s => s.finishedAt).sort((a, b) => b.startedAt - a.startedAt);
   $('#history-sub').textContent = finished.length
@@ -812,7 +959,7 @@ function renderHistory() {
   const minutes = Math.round(period.reduce((total, session) => total + sessionDuration(session), 0) / 60000);
   const summary = `<div class="history-totals" aria-label="${calendar ? 'Resumen del mes' : 'Resumen completo'}"><div><strong>${period.length}</strong><span>Sesiones${calendar ? ' del mes' : ''}</span></div><div><strong>${new Set(period.map(session => dateKey(session.startedAt))).size}</strong><span>Días activos</span></div><div><strong>${minutes}</strong><span>Minutos</span></div></div>`;
   const visible = calendar ? finished.filter(session => dateKey(session.startedAt) === historyState.selected) : finished;
-  slot.innerHTML = `${summary}<div class="history-switch seg" role="group" aria-label="Vista del historial"><button data-history-mode="calendar" class="${calendar ? 'on' : ''}" aria-pressed="${calendar}">Calendario</button><button data-history-mode="list" class="${calendar ? '' : 'on'}" aria-pressed="${!calendar}">Todas las sesiones</button></div>
+  slot.innerHTML = `${summary}<button class="progress-entry" id="history-exercises"><span>Tu progreso por ejercicio</span><small>Cargas, repeticiones y sesiones anteriores</small><span aria-hidden="true">›</span></button>${annualActivityHtml(finished)}<div class="history-switch seg" role="group" aria-label="Vista del historial"><button data-history-mode="calendar" class="${calendar ? 'on' : ''}" aria-pressed="${calendar}">Calendario</button><button data-history-mode="list" class="${calendar ? '' : 'on'}" aria-pressed="${!calendar}">Todas las sesiones</button></div>
     ${calendar ? historyCalendar(finished) : ''}
     <h2 class="section-title history-date" id="history-date-title">${calendar ? esc(fmtDate(new Date(`${historyState.selected}T12:00:00`), { weekday: 'long', day: 'numeric', month: 'long' })) : 'Sesiones completadas'}</h2>
     <div aria-labelledby="history-date-title">${visible.length ? `<div class="list-card">${visible.map(s => {
@@ -831,6 +978,36 @@ function renderHistory() {
   }).join('')}</div>` : `<div class="history-empty"><p>${calendar ? 'Sin entrenamientos registrados este día.' : 'Aún no hay sesiones completadas.'}</p></div>`}</div>`;
 
   $$('.history-item').forEach(el => { el.onclick = () => showSessionDetail(el.dataset.session); });
+  $('#history-exercises').onclick = openExerciseProgress;
+  const activity = $('#annual-activity');
+  activity.ontoggle = () => { if (activity.isConnected) historyState.activityOpen = activity.open; };
+  const changeYear = year => {
+    if (!Number.isInteger(year) || year < 1900 || year > 2100) {
+      toast('Elige un año entre 1900 y 2100.');
+      $('#activity-year').value = historyState.activityYear || new Date().getFullYear();
+      return;
+    }
+    historyState.activityYear = year;
+    historyState.activityOpen = true;
+    renderHistory();
+    $('#activity-year').focus({ preventScroll: true });
+  };
+  $('#activity-year').onchange = event => changeYear(Number(event.target.value));
+  $$('[data-activity-step]').forEach(button => {
+    button.onclick = () => changeYear((historyState.activityYear || new Date().getFullYear()) + Number(button.dataset.activityStep));
+  });
+  $$('[data-activity-month]').forEach(button => {
+    button.onclick = () => {
+      const month = button.dataset.activityMonth;
+      historyState.mode = 'calendar';
+      historyState.month = new Date(`${month}-01T12:00:00`);
+      const recent = finished.find(session => dateKey(session.startedAt).startsWith(month));
+      historyState.selected = recent ? dateKey(recent.startedAt) : `${month}-01`;
+      historyState.activityOpen = false;
+      renderHistory();
+      $('#history-month').focus({ preventScroll: true });
+    };
+  });
   slot.onkeydown = event => {
     const button = event.target.closest('[data-history-date]');
     const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 }[event.key];
@@ -894,17 +1071,23 @@ function showSessionDetail(id) {
       const value = vals[setIndex];
       const done = recordedSet(value);
       const record = setRecord(s, mv.id, setIndex);
-      return `<div class="session-set${done ? ' done' : ''}"><small>Serie ${setIndex + 1}</small><b>${mv.kind === 'weight' ? done ? esc(value) : '—' : done ? '✓' : '—'}</b><span>${record ? esc(trainingUI.recordText(record)) : done ? 'Registrada' : 'Sin registrar'}</span></div>`;
+      const context = record ? [
+        Number.isInteger(record.reps) ? `${record.reps} reps${record.repsSource === 'plan' ? ' del plan' : ''}` : null,
+        record.label && record.label !== 'Habitual' ? record.label : null,
+        Number.isInteger(record.rir) ? `${record.rir === 3 ? '3+' : record.rir} en reserva` : null,
+        record.discomfort ? 'Molestia' : null
+      ].filter(Boolean).join(' · ') : done ? 'Registrada' : 'Sin registrar';
+      return `<div class="session-set${done ? ' done' : ''}"><small>Serie ${setIndex + 1}</small><b>${mv.kind === 'weight' ? done ? esc(value) : '—' : done ? '✓' : '—'}${record?.unit && record.unit !== 'escala' ? `<small> ${esc(record.unit)}</small>` : ''}</b><span>${esc(context)}</span>${s.finishedAt && mv.kind === 'weight' && done && typeof value === 'string' ? `<button class="history-edit-weight" data-edit-weight="${esc(mv.id)}" data-set-index="${setIndex}" aria-label="Corregir peso, serie ${setIndex + 1} de ${esc(mv.name)}">Corregir</button>` : ''}</div>`;
     }).join('');
-    return `<div class="session-movement"><h4>${esc(mv.name)}</h4><p>${esc(mv.reps || '')}${mv.timer ? ` · ${mv.timer} s` : ''}</p>${mv.note ? `<p class="session-note">${esc(mv.note)}</p>` : ''}<div class="session-sets">${sets}</div></div>`;
+    return `<div class="session-movement"><div class="session-movement-heading"><h4>${esc(mv.name)}</h4>${s.routineSnapshot ? `<button class="text-action" data-movement-progress="${esc(mv.id)}" aria-label="Ver progreso de ${esc(mv.name)}">Progreso</button>` : ''}</div><p>${esc(mv.reps || '')}${mv.timer ? ` · ${mv.timer} s` : ''}</p>${mv.note ? `<p class="session-note">${esc(mv.note)}</p>` : ''}<div class="session-sets">${sets}</div></div>`;
   }).join('')}</section>`).join('');
 
   openSheet(`
-    <div class="grabber"></div>
+    <span class="eyebrow">Tu historial</span>
     <h2>${esc(day?.title || 'Entrenamiento anterior')}</h2>
     <p>${fmtDate(s.startedAt)} · ${fmtDuration(sessionDuration(s))}</p>
-    <button class="btn btn-ghost duration-edit" id="edit-duration">Editar duración</button>
-    <button class="btn btn-ghost" id="session-day-report">Balance de este día</button>
+    <div class="session-actions"><button class="btn btn-ghost duration-edit" id="edit-duration">Editar duración</button>
+    <button class="btn btn-ghost" id="session-day-report">Balance del día</button></div>
     ${!s.routineSnapshot ? '<p class="session-legacy">Esta sesión no conserva una copia original de su rutina. Los datos disponibles pueden no reflejar el plan de ese día.</p>' : ''}
     <div class="summary-grid">
       <div><b>${day ? p.done : Object.values(s.entries || {}).filter(Array.isArray).flat().filter(recordedSet).length}</b><span>Series</span></div>
@@ -912,6 +1095,7 @@ function showSessionDetail(id) {
       <div><b>${esc(day?.label?.replace('Día ', 'D') || '—')}</b><span>Rutina</span></div>
     </div>
     ${s.notes ? `<div class="block-note" style="margin-bottom:16px">${esc(s.notes)}</div>` : ''}
+    ${personalRecordsHtml(s)}
     <div style="margin-bottom:18px">${rows}</div>
     <button class="btn btn-ghost" id="sheet-close">Cerrar</button>
     <button class="session-delete" id="sheet-delete">Eliminar sesión</button>
@@ -920,6 +1104,22 @@ function showSessionDetail(id) {
   $('#sheet-close').onclick = closeSheet;
   $('#edit-duration').onclick = () => openDurationEditor(s, () => showSessionDetail(id));
   $('#session-day-report').onclick = () => trainingUI.openProgress('day', s.startedAt);
+  bindRecordLinks();
+  $$('[data-movement-progress]').forEach(button => {
+    button.onclick = () => openMovementHistory(button.dataset.movementProgress, id);
+  });
+  $$('[data-edit-weight]').forEach(button => {
+    button.onclick = () => {
+      const movement = blocks.flatMap(block => block.movements).find(item => item.id === button.dataset.editWeight);
+      const scroll = $('#sheet').scrollTop;
+      const index = Number(button.dataset.setIndex);
+      openHistoryWeightEditor(id, movement, index, () => {
+        showSessionDetail(id);
+        $('#sheet').scrollTop = scroll;
+        $$('[data-edit-weight]').find(item => item.dataset.editWeight === movement.id && Number(item.dataset.setIndex) === index)?.focus({ preventScroll: true });
+      });
+    };
+  });
   $('#sheet-delete').onclick = async () => {
     const confirmed = await confirmSheet({ title: 'Eliminar sesión', body: 'Se eliminará este entrenamiento. El cambio también se enviará a tus dispositivos al sincronizar.', confirm: 'Eliminar', cancel: 'Conservar', danger: true });
     if (!confirmed) return;
@@ -941,6 +1141,10 @@ function showSessionDetail(id) {
 /** Aviso de cambio de rutina: aparece 14 días antes de la fecha del plan. */
 function renderRoutineAlert() {
   const slot = $('#routine-alert');
+  if (state.legacyFallback) {
+    slot.innerHTML = '<p class="notice warn" role="status">Plan histórico de compatibilidad, no confirmado: no hay una copia guardada de la rutina original. Revisa o importa tu plan desde Mis rutinas; el historial se conserva.</p>';
+    return;
+  }
   if (!state.profile.routineChangeDate) { slot.innerHTML = ''; return; }
   const target = new Date(state.profile.routineChangeDate + 'T12:00:00').getTime();
   const days = Math.ceil((target - Date.now()) / 86400000);
@@ -963,7 +1167,19 @@ function renderRoutineAlert() {
 /* ---------- Notas del entrenamiento ---------- */
 
 function updateNotesButton() {
-  $('#btn-notes').classList.toggle('has-note', Boolean(state.session?.notes?.trim()));
+  $('#btn-workout-menu').classList.toggle('has-note', Boolean(state.session?.notes?.trim()));
+}
+
+function openWorkoutMenu() {
+  openSheet(`<span class="eyebrow">Tu entrenamiento</span><h2>A mano, sin estorbar</h2><div class="list-card">
+    <button class="list-row" id="workout-notes"><span class="lr-body"><strong>Nota del entrenamiento</strong><small>${state.session?.notes ? 'Tienes una nota guardada' : 'Sensaciones o detalles que quieras recordar'}</small></span><span aria-hidden="true">›</span></button>
+    <button class="list-row" id="workout-rest"><span class="lr-body"><strong>Iniciar descanso</strong><small>${state.restSeconds} segundos</small></span><span aria-hidden="true">›</span></button>
+    <button class="list-row" id="workout-preferences"><span class="lr-body"><strong>Descanso y pantalla</strong><small>Preferencias, sin cambiar las series del coach</small></span><span aria-hidden="true">›</span></button>
+    <button class="list-row" id="workout-balance"><span class="lr-body"><strong>Balance de la semana</strong><small>Sesiones finalizadas y registros comparables</small></span><span aria-hidden="true">›</span></button></div>`);
+  $('#workout-notes').onclick = openNotes;
+  $('#workout-rest').onclick = () => { closeSheet(); startRest(state.restSeconds); };
+  $('#workout-preferences').onclick = openTrainingPreferences;
+  $('#workout-balance').onclick = () => trainingUI.openProgress('week', Date.now());
 }
 
 function openNotes() {
@@ -988,64 +1204,718 @@ function openNotes() {
 
 /* ---------- Historial de un ejercicio ---------- */
 
-function openMovementHistory(movementId) {
-  const activeDay = sessionDay(state.session);
+function openExerciseProgress() {
+  const exercises = new Map();
+  for (const session of state.sessions.filter(item => item.finishedAt && !item.deletedAt).sort((a, b) => b.startedAt - a.startedAt)) {
+    for (const movement of session.routineSnapshot?.blocks.flatMap(block => block.movements) || []) {
+      if (!session.entries?.[movement.id]?.some(recordedSet)) continue;
+      const key = JSON.stringify([movement.id, movement.name]);
+      if (!exercises.has(key)) exercises.set(key, { movement, sessionId: session.id, sessions: new Set() });
+      exercises.get(key).sessions.add(session.id);
+    }
+  }
+  openSheet(`<span class="eyebrow">Tu historial</span><h2>Progreso por ejercicio</h2><p class="training-caption">Tus registros, sin rankings ni unidades inventadas.</p><label class="progress-search"><span>Buscar ejercicio</span><input id="progress-search" type="search" placeholder="Nombre del ejercicio" autocomplete="off"></label><div class="exercise-progress-list" id="exercise-progress-list"></div>`);
+  const render = () => {
+    const query = normalizeExercise($('#progress-search').value);
+    const rows = [...exercises.values()].filter(item => normalizeExercise(item.movement.name).includes(query));
+    $('#exercise-progress-list').innerHTML = rows.length ? rows.map(item => `<button class="exercise-progress-item" data-progress-movement="${esc(item.movement.id)}" data-source-session="${esc(item.sessionId)}"><span><strong>${esc(item.movement.name)}</strong><small>${plural(item.sessions.size, 'sesión registrada', 'sesiones registradas')}</small></span><span aria-hidden="true">›</span></button>`).join('') : `<p class="movement-history-empty">${query ? 'No hay ejercicios con ese nombre.' : 'Tus ejercicios aparecerán aquí al completar un entrenamiento. Los registros sin copia de la rutina siguen disponibles por fecha.'}</p>`;
+    $$('[data-progress-movement]').forEach(button => {
+      button.onclick = () => openMovementHistory(button.dataset.progressMovement, button.dataset.sourceSession);
+    });
+  };
+  $('#progress-search').oninput = render;
+  render();
+}
+
+function loadTrendHtml(group) {
+  const { points, record } = group;
+  const first = points[0], last = points.at(-1);
+  const min = Math.min(...points.map(point => point.load)), max = Math.max(...points.map(point => point.load));
+  const coordinates = points.map(point => ({
+    x: points.length === 1 ? 160 : 24 + (point.at - first.at) / Math.max(1, last.at - first.at) * 272,
+    y: max === min ? 76 : 128 - (point.load - min) / (max - min) * 104
+  }));
+  const line = coordinates.map(point => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' ');
+  const percentage = first.load > 0 && points.length > 1 ? (last.load - first.load) / first.load * 100 : null;
+  const change = Number.isFinite(percentage) ? percentage : null;
+  const unit = record.unit === 'escala' ? '' : ` ${esc(record.unit)}`;
+  return `<div class="load-trend-card">
+    <div class="load-trend-heading"><span class="eyebrow">Carga registrada · ${record.reps} reps</span><span>${plural(points.length, 'sesión', 'sesiones')}</span></div>
+    <div class="load-trend-value"><strong>${last.load}<small>${unit}</small></strong><span>${change === null ? points.length === 1 ? 'Primera referencia' : first.load === 0 ? 'Referencia inicial en cero' : 'No se puede calcular el porcentaje' : `${change > 0 ? '+' : ''}${change.toLocaleString('es-MX', { maximumFractionDigits: 1 })}% desde el primer registro comparable`}</span></div>
+    <svg class="load-trend-chart" viewBox="0 0 320 152" role="img" aria-label="${esc(`Carga máxima por sesión con ${record.reps} reps. Primer registro: ${first.load}; último: ${last.load}; mejor: ${max}.`)}">
+      <path class="load-trend-grid" d="M24 24H296M24 76H296M24 128H296"/>
+      <polyline class="load-trend-line" points="${line}"/>
+      ${coordinates.map((point, index) => `<circle class="${index === coordinates.length - 1 ? 'latest' : ''}" cx="${point.x}" cy="${point.y}" r="${index === coordinates.length - 1 ? 5 : 3}"/>`).join('')}
+    </svg>
+    <div class="load-trend-dates"><span>${fmtDate(first.at, { day: 'numeric', month: 'short', year: 'numeric' })}</span>${points.length > 1 ? `<span>${fmtDate(last.at, { day: 'numeric', month: 'short', year: 'numeric' })}</span>` : ''}</div>
+    <div class="load-trend-best"><span>Mejor registro comparable</span><b>${max}${unit} × ${record.reps}</b></div>
+  </div><p class="training-caption">Compara números del mismo equipo y reps registradas; no mide tu nivel de fuerza. Si cambias de máquina o de escala sin registrarlo, la app no puede distinguirlo. Las reps del plan no demuestran esfuerzo.</p>`;
+}
+
+function openMovementHistory(movementId, sourceSessionId = null) {
+  const activeDay = sessionDay(sourceSessionId ? state.sessions.find(item => item.id === sourceSessionId) : state.session);
   const activeBlock = activeDay?.blocks.find(item => item.movements.some(movement => movement.id === movementId));
   const found = activeBlock ? { movement: activeBlock.movements.find(item => item.id === movementId), block: activeBlock } : findMovement(movementId);
   if (!found) return;
   const { movement } = found;
   const rows = state.sessions
-    .filter(s => s.finishedAt && s.entries?.[movementId])
+    .filter(s => s.finishedAt && !s.deletedAt && Array.isArray(s.entries?.[movementId]))
     .sort((a, b) => b.startedAt - a.startedAt)
     .map(session => ({ session, movement: sessionDay(session)?.blocks.flatMap(item => item.movements).find(item => item.id === movementId && item.name === movement.name) }))
     .filter(row => row.movement)
     .map(row => ({ ...row, sets: row.session.entries[movementId].flatMap((value, index) => recordedSet(value) ? [{ value, index, record: setRecord(row.session, movementId, index) }] : []) }))
     .filter(row => row.sets.length);
+  const groups = movementLoadHistory(movement, state.sessions);
+  const groupLabel = group => [
+    group.record.label === 'Habitual' ? 'Tu equipo' : group.record.label,
+    group.record.variant === 'alternative' ? 'Alternativo' : null,
+    `${group.record.reps} reps`, group.record.unit === 'escala' ? null : group.record.unit,
+    `Plan ${group.prescription}`, group.note
+  ].filter(Boolean).join(' · ');
   openSheet(`<span class="eyebrow">Historial del ejercicio</span><h2>${esc(movement.name)}</h2>
     <p class="movement-history-count">${plural(rows.length, 'sesión', 'sesiones')}</p>
+    ${groups.length === 1 ? `<p class="training-caption">${esc(groupLabel(groups[0]))}</p>` : ''}
+    ${groups.length > 1 ? `<div class="progress-contexts" role="group" aria-label="Registros comparables">${groups.map((group, index) => `<button data-trend-group="${index}" aria-pressed="${index === 0}">${esc(groupLabel(group))}</button>`).join('')}</div>` : ''}
+    <div id="movement-load-trend">${groups.length ? loadTrendHtml(groups[0]) : movement.kind === 'weight' && rows.length ? '<p class="training-caption">Tus pesos siguen abajo. La curva necesita registros con reps y contexto comparables; no adivinamos los datos antiguos ni comparamos asistencia o planes especiales.</p>' : ''}</div>
     <div class="movement-history">${rows.length ? rows.map(row => `<section class="movement-history-row">
-      <header><h3>${fmtDate(row.session.startedAt, { day: 'numeric', month: 'short', year: 'numeric' })}</h3><span>${esc(row.movement.reps)} · ${plural(row.sets.length, 'serie', 'series')}</span></header>
+      <header><h3>${fmtDate(row.session.startedAt, { day: 'numeric', month: 'short', year: 'numeric' })}</h3><button class="text-action" data-history-session="${esc(row.session.id)}">Ver sesión</button><span>${esc(row.movement.reps)} · ${plural(row.sets.length, 'serie', 'series')}</span></header>
       <div class="movement-history-sets">${row.sets.map(item => `<div class="movement-history-set"><span class="history-set-number">${item.index + 1}</span><strong>${row.movement.kind === 'weight' ? esc(item.value) : 'Hecha'}${item.record?.unit && item.record.unit !== 'escala' ? `<small>${esc(item.record.unit)}</small>` : ''}</strong><span>${item.record?.reps != null ? `${esc(item.record.reps)} reps` : esc(row.movement.reps)}</span>${item.record?.label && item.record.variant !== 'original' ? `<small class="history-set-equipment">${esc(item.record.label)}</small>` : ''}</div>`).join('')}</div>
     </section>`).join('') : '<p class="movement-history-empty">Aún no has registrado este ejercicio.</p>'}</div>`);
+  $$('[data-trend-group]').forEach(button => {
+    button.onclick = () => {
+      $$('[data-trend-group]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));
+      $('#movement-load-trend').innerHTML = loadTrendHtml(groups[Number(button.dataset.trendGroup)]);
+    };
+  });
+  $$('[data-history-session]').forEach(button => {
+    button.onclick = () => showSessionDetail(button.dataset.historySession);
+  });
 }
 
 /* ---------- Rutina: carga, importación y editor ---------- */
 
 const ROUTINE_ID = 'active';
 
-async function loadRoutine() {
-  const saved = (await db.allRoutines()).find(r => r.id === ROUTINE_ID);
-  state.profile = normalizeProfile(saved?.profile);
-  state.routineUpdatedAt = saved?.updatedAt || null;
-  if (saved?.days?.length) {
-    state.routine = sanitizeRoutine(saved.days);
-    state.routineId = saved.id;
-  } else {
-    state.routine = DEFAULT_ROUTINE;
+function routineRecord(record) {
+  return {
+    ...record,
+    days: sanitizeRoutine(record.days),
+    active: record.active == null && record.id === ROUTINE_ID ? true : Boolean(record.active),
+    archived: Boolean(record.archived)
+  };
+}
+
+function routineStats(days) {
+  const clean = Array.isArray(days) ? days : [];
+  return {
+    days: clean.length,
+    movements: clean.reduce((total, day) => total + day.blocks.reduce((count, block) => count + block.movements.length, 0), 0),
+    sets: clean.reduce((total, day) => total + totalSets(day), 0)
+  };
+}
+
+function activeRoutineRecord() {
+  return state.routines.find(record => record.id === state.routineId) || null;
+}
+
+function pendingSessionSnapshots(sessions, days) {
+  return sessions.filter(session => !session.deletedAt && !session.routineSnapshot && days.some(day => day.id === session.dayId))
+    .map(session => ({ ...session, routineSnapshot: structuredClone(days.find(day => day.id === session.dayId)) }));
+}
+
+function verifyRoutineRevision(record, expected) {
+  if ((record ? JSON.stringify(record) : null) !== expected) {
+    throw new Error('Esta rutina cambió en otra ventana. No se sobrescribió nada; vuelve a abrir la biblioteca o el editor.');
   }
+}
+
+async function loadRoutine() {
+  const raw = (await db.allRoutines()) || [];
+  state.personalProfile = await db.getMeta('personalProfile');
+  if (state.personalProfile != null) validatePersonalProfile(state.personalProfile);
+  state.routineRevisions = new Map(raw.map(record => [record.id, JSON.stringify(record)]));
+  const records = raw.filter(record => record && typeof record.id === 'string' && !record.deletedAt).map(routineRecord);
+  const candidates = records.filter(record => record.active && !record.archived).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  state.routineConflict = candidates.length > 1;
+  const legacyRecord = raw.find(record => record.id === ROUTINE_ID && record.active == null && !record.archived && !record.deletedAt);
+  let active = state.routineConflict ? null : candidates[0] || (legacyRecord ? routineRecord(legacyRecord) : null);
+
+  const legacyInstall = !raw.length && state.sessions.some(session => {
+    if (session.routineSnapshot) return false;
+    const day = DEFAULT_ROUTINE.find(item => item.id === session.dayId);
+    const keys = Object.keys(session.entries || {}).filter(key => !key.startsWith('_'));
+    const ids = new Set(day?.blocks.flatMap(block => block.movements.map(movement => movement.id)) || []);
+    return keys.length > 0 && keys.every(key => ids.has(key));
+  });
+  state.legacyFallback = legacyInstall;
+  if (!active && legacyInstall) {
+    active = routineRecord({ id: ROUTINE_ID, name: 'Mi rutina', days: structuredClone(DEFAULT_ROUTINE), active: true, source: 'legacy' });
+    records.push(active);
+  }
+
+  state.routines = records;
+  state.activeRoutineId = active?.id || null;
+  state.routineId = active?.id || null;
+  state.routineUpdatedAt = active?.updatedAt || null;
+  state.routine = active?.days?.length ? active.days : [];
+  const legacyProfile = active?.id === ROUTINE_ID || active?.source === 'legacy';
+  const fallbackProfile = state.personalProfile || (legacyProfile ? PROFILE : EMPTY_PROFILE);
+  state.profile = normalizeProfile(active?.profile || {}, fallbackProfile);
+
+  await rebuildExerciseLibrary();
 }
 
 async function saveRoutine(days, name, newCycle = false) {
   const clean = sanitizeRoutine(days);
   if (!clean.length) throw new Error('La rutina quedó vacía');
-  const oldCycle = state.routine[0]?.cycleId || 'legacy';
-  const cycle = newCycle ? { cycleId: uid(), cycleName: `Rutina · ${fmtDate(Date.now(), { day: 'numeric', month: 'short', year: 'numeric' })}`, cycleStartedAt: Date.now() } : { cycleId: state.routine[0]?.cycleId, cycleName: state.routine[0]?.cycleName, cycleStartedAt: state.routine[0]?.cycleStartedAt };
-  clean.forEach(day => Object.assign(day, cycle));
-  await saveSession(true);
-  for (const session of state.sessions) {
-    const original = dayById(session.dayId);
-    if (!session.routineSnapshot && original) {
-      session.routineSnapshot = JSON.parse(JSON.stringify(original));
-      await db.putSession(session);
+  const targetId = state.draftRoutineId || state.routineId || ROUTINE_ID;
+  const expectedActiveId = state.activeRoutineId;
+  const expectedStoredActiveId = state.routineRevisions.has(expectedActiveId) ? expectedActiveId : null;
+  const draft = Boolean(state.draft);
+  const draftActivate = state.draftActivate;
+  const draftSource = state.draftSource;
+  const draftGeneration = draft ? structuredClone(state.draftGeneration) : null;
+  const expectedRevision = state.draftBaseline?.id === targetId ? state.draftBaseline.revision : state.routineRevisions.get(targetId) || null;
+  const result = await db.updateRoutineLibrary(({ routines: records, sessions, exercises, personalProfile }) => {
+    const existing = records.find(record => record.id === targetId);
+    verifyRoutineRevision(existing, expectedRevision);
+    if (backupActiveRoutines(records, []).length > 1) throw new Error('Elige primero una sola rutina activa desde Mis rutinas.');
+    const oldActive = backupActiveRoutines(records, [])[0];
+    const inheritedProfile = oldActive?.profile || (personalProfile ? validatePersonalProfile(personalProfile) : state.profile);
+    if ((oldActive?.id || null) !== expectedStoredActiveId) {
+      throw new Error('La rutina activa cambio en otra ventana. Abre de nuevo el editor.');
+    }
+    const keepCurrentActive = existing?.active && targetId === expectedActiveId;
+    const activate = keepCurrentActive || (draft ? draftActivate !== false : true);
+    if (activate && (state.session || sessions.some(session => !session.finishedAt && !session.deletedAt)) && targetId !== expectedActiveId) {
+      throw new Error('Termina la sesión antes de activar otra rutina. Puedes guardarla sin activarla.');
+    }
+    const previousDays = oldActive?.days || state.routine;
+    const previousCycle = existing?.days?.[0] || (targetId === state.routineId ? state.routine[0] : clean[0]);
+    const oldCycle = previousDays[0]?.cycleId || 'legacy';
+    const cycle = newCycle
+      ? { cycleId: uid(), cycleName: `Rutina · ${fmtDate(Date.now(), { day: 'numeric', month: 'short', year: 'numeric' })}`, cycleStartedAt: Date.now() }
+      : { cycleId: previousCycle?.cycleId, cycleName: previousCycle?.cycleName, cycleStartedAt: previousCycle?.cycleStartedAt };
+    clean.forEach(day => Object.assign(day, cycle));
+    const changes = [];
+    if (newCycle && activate && oldActive?.days?.length) {
+      changes.push({
+        id: `cycle-${oldCycle === 'legacy' ? uid() : oldCycle}`,
+        name: oldActive.name || previousDays[0]?.cycleName || 'Historial sin ciclo',
+        days: structuredClone(oldActive.days), active: false, archived: true, source: 'cycle'
+      });
+    }
+    if (activate) {
+      for (const record of backupActiveRoutines(records, []).filter(record => record.id !== targetId)) {
+        changes.push({ ...record, active: false });
+      }
+    }
+    const now = Date.now();
+    const routineSource = existing?.source === 'legacy' ? 'manual' : existing?.source || draftSource || 'manual';
+    changes.push({
+      ...(existing || {}),
+      id: targetId,
+      name: String(name || 'Mi rutina').trim().slice(0, 100) || 'Mi rutina',
+      days: clean,
+      active: activate,
+      archived: false,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+      lastUsedAt: activate ? now : existing?.lastUsedAt,
+      source: routineSource,
+      ...(draftGeneration ? { generation: draftGeneration } : {}),
+      userModifiedAt: now,
+      ...(existing?.profile ? { profile: existing.profile } : activate && inheritedProfile?.name ? { profile: inheritedProfile } : {})
+    });
+    const exerciseSource = draftSource === 'import' || ['import', 'imported', 'legacy'].includes(routineSource) ? 'imported' : 'private';
+    return {
+      routines: changes,
+      sessions: pendingSessionSnapshots(sessions, previousDays),
+      exercises: routineExerciseChanges(clean, targetId, exerciseSource, exercises, Boolean(draftGeneration)),
+      result: newCycle && activate && oldActive?.days?.length ? oldCycle : null
+    };
+  });
+  try {
+    await loadAll({ preserveSession: true });
+    await loadRoutine();
+  } catch {
+    throw new Error('La rutina se guardo, pero no se pudo actualizar la pantalla. Vuelve a abrir la app antes de crear otro ciclo.');
+  }
+  return result;
+}
+
+function exerciseNameKey(name) {
+  return String(name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function routineExerciseChanges(days, routineId, origin, existing, preserveExisting = false) {
+  const byName = new Map(existing.map(record => [record.nameKey || exerciseNameKey(record.name), record]));
+  const changes = new Map();
+  const catalogByName = new Map(EXERCISE_CATALOG.map(record => [exerciseNameKey(record.name), record]));
+  const personalSource = origin === 'imported' ? 'imported' : origin === 'restored' ? 'restored' : 'private';
+  const now = Date.now();
+  for (const movement of days.flatMap(day => day.blocks.flatMap(block => block.movements))) {
+    const name = String(movement.name || '').trim();
+    const nameKey = exerciseNameKey(name);
+    if (!name || !nameKey) continue;
+    const previous = byName.get(nameKey);
+    if (previous && preserveExisting) continue;
+    const catalogMatch = catalogByName.get(nameKey);
+    const sources = new Set(previous?.sources || (previous?.source ? [previous.source] : []));
+    sources.add(personalSource);
+    const record = {
+      ...(previous || {}),
+      id: previous?.id || `exercise-${uid()}`,
+      name: previous?.name || name,
+      nameKey,
+      muscleGroup: previous?.muscleGroup || movement.muscleGroup || catalogMatch?.muscleGroup || exerciseFocus(movement),
+      kind: previous?.kind || movement.kind || catalogMatch?.kind || 'weight',
+      timer: previous?.timer ?? movement.timer,
+      equipment: previous?.equipment || movement.equipment || catalogMatch?.equipment || '',
+      source: sources.has('private') ? 'private' : sources.has('imported') ? 'imported' : 'restored',
+      sources: [...sources],
+      importedRoutineIds: personalSource === 'imported' ? [...new Set([...(previous?.importedRoutineIds || []), routineId])] : previous?.importedRoutineIds || [],
+      createdRoutineIds: personalSource === 'private' ? [...new Set([...(previous?.createdRoutineIds || []), routineId])] : previous?.createdRoutineIds || [],
+      ...(personalSource === 'restored' ? { restoredRoutineIds: [...new Set([...(previous?.restoredRoutineIds || []), routineId])] } : {}),
+      importedAt: previous?.importedAt || now,
+      createdAt: previous?.createdAt || now,
+      updatedAt: now
+    };
+    changes.set(record.id, record);
+    byName.set(nameKey, record);
+  }
+  return [...changes.values()];
+}
+
+async function rebuildExerciseLibrary() {
+  await db.updateRoutineLibrary(({ routines, exercises }) => {
+    const current = new Map(exercises.map(record => [record.id, record]));
+    const changes = [];
+    for (const routine of routines.filter(record => !record.deletedAt)) {
+      const origin = ['import', 'imported', 'legacy'].includes(routine.source) ? 'imported' :
+        ['manual', 'private', 'generated', 'duplicate', 'cycle'].includes(routine.source) ? 'private' : 'restored';
+      for (const exercise of routineExerciseChanges(sanitizeRoutine(routine.days), routine.id, origin, [...current.values()], true)) {
+        current.set(exercise.id, exercise);
+        changes.push(exercise);
+      }
+    }
+    return { exercises: changes };
+  });
+  state.exercises = (await db.allExercises()).filter(record => !record.deletedAt);
+}
+
+async function activateRoutine(id) {
+  if (state.session) return toast('Termina o descarta la sesión antes de cambiar de rutina');
+  let committed = false;
+  try {
+    const target = await db.updateRoutineLibrary(({ routines, sessions, personalProfile }) => {
+      if (sessions.some(session => !session.finishedAt && !session.deletedAt)) {
+        throw new Error('Termina o descarta la sesion antes de cambiar de rutina.');
+      }
+      const selected = routines.find(record => record.id === id && !record.archived && !record.deletedAt);
+      if (!selected) throw new Error('La rutina ya no esta disponible. Abre de nuevo la biblioteca.');
+      const activePlans = backupActiveRoutines(routines, []);
+      const days = activePlans.length === 1 ? activePlans[0].days : activePlans.length ? [] : state.routine;
+      const inheritedProfile = (activePlans.length === 1 ? activePlans[0].profile : null) ||
+        (personalProfile ? validatePersonalProfile(personalProfile) : null);
+      return {
+        routines: [...activePlans.filter(record => record.id !== id).map(record => ({ ...record, active: false })),
+          { ...selected, active: true, lastUsedAt: Date.now(),
+            ...(!selected.profile && inheritedProfile?.name ? { profile: { ...inheritedProfile } } : {}) }],
+        sessions: pendingSessionSnapshots(sessions, days),
+        result: selected
+      };
+    });
+    committed = true;
+    await loadAll();
+    await loadRoutine();
+    closeSheet();
+    renderHome(); await renderSettings();
+    sync.syncQuietly();
+    toast(`${target.name || 'Rutina'} · ahora está activa`);
+  } catch (error) {
+    toast(committed ? 'La rutina se activo, pero no se pudo actualizar la pantalla. Vuelve a abrir la app.' :
+      `No se cambio la rutina. ${error?.message || 'Intentalo de nuevo.'}`);
+  }
+}
+
+async function duplicateRoutine(id) {
+  const source = state.routines.find(record => record.id === id);
+  if (!source) return;
+  await db.putRoutine({
+    ...source,
+    id: `routine-${uid()}`,
+    name: `${source.name || 'Rutina'} · copia`,
+    days: structuredClone(source.days),
+    active: false,
+    archived: false,
+    source: 'duplicate',
+    createdAt: Date.now(),
+    updatedAt: undefined
+  });
+  await loadRoutine();
+  openRoutineCatalog();
+  toast('Rutina duplicada');
+}
+
+async function archiveRoutine(id) {
+  const target = state.routines.find(record => record.id === id);
+  if (!target || target.active) return toast('La rutina activa no se puede archivar');
+  const revision = state.routineRevisions.get(id) || null;
+  const ok = await confirmSheet({ title: 'Archivar rutina', body: `“${target.name || 'Rutina'}” seguirá guardada, pero dejará de aparecer entre tus rutinas disponibles.`, confirm: 'Archivar', cancel: 'Conservar' });
+  if (!ok) return;
+  await changeRoutineArchive(id, true, revision);
+}
+
+async function changeRoutineArchive(id, archived, revision = state.routineRevisions.get(id) || null) {
+  let committed = false;
+  try {
+    await db.updateRoutineLibrary(({ routines }) => {
+      const current = routines.find(record => record.id === id);
+      verifyRoutineRevision(current, revision);
+      if (!current || (archived && current.active)) throw new Error('La rutina ya no está disponible para esta acción.');
+      return { routines: [{ ...current, archived, ...(archived ? { active: false } : {}) }] };
+    });
+    committed = true;
+    await loadRoutine();
+    openRoutineCatalog();
+    toast(archived ? 'Rutina archivada' : 'Rutina restaurada');
+  } catch (error) {
+    console.error('No se pudo actualizar el archivo de rutinas.', error);
+    toast(committed ? 'El cambio se guardó, pero no se pudo actualizar la pantalla. Vuelve a abrir la app.' : error.message);
+  }
+}
+
+function routineCard(record, archived = false) {
+  const stats = routineStats(record.days);
+  const label = record.active ? 'Activa' : archived ? 'Archivada' : 'Guardada';
+  return `<article class="routine-card${record.active ? ' active' : ''}${archived ? ' archived' : ''}">
+    <button class="routine-choice" data-routine-open="${esc(record.id)}" aria-pressed="${record.active}">
+      <span class="routine-card-mark" aria-hidden="true">${record.active ? '✓' : '·'}</span>
+      <span class="routine-card-copy"><strong>${esc(record.name || 'Rutina sin nombre')}</strong><small>${stats.days} ${stats.days === 1 ? 'día' : 'días'} · ${stats.movements} ${stats.movements === 1 ? 'ejercicio' : 'ejercicios'} · ${stats.sets} series</small></span>
+      <span class="routine-card-state">${label}</span>
+    </button>
+    <div class="routine-card-actions">
+      ${archived ? `<button class="routine-card-action" data-routine-restore="${esc(record.id)}" aria-label="Restaurar ${esc(record.name || 'rutina')}" title="Restaurar">${ED_ICON.restore}</button>` : `<button class="routine-card-action" data-routine-edit="${esc(record.id)}" aria-label="Editar ${esc(record.name || 'rutina')}" title="Editar">${ED_ICON.edit}</button><button class="routine-card-action" data-routine-duplicate="${esc(record.id)}" aria-label="Duplicar ${esc(record.name || 'rutina')}" title="Duplicar">${ED_ICON.duplicate}</button>${record.active ? '' : `<button class="routine-card-action danger" data-routine-archive="${esc(record.id)}" aria-label="Archivar ${esc(record.name || 'rutina')}" title="Archivar">${ED_ICON.trash}</button>`}`}
+    </div>
+  </article>`;
+}
+
+async function openRoutineCatalog() {
+  const token = sheetToken;
+  try {
+    await loadRoutine();
+  } catch (error) {
+    console.error('No se pudo leer la biblioteca de rutinas.', error);
+    toast('No se pudo leer la biblioteca. Tus planes se conservan; vuelve a intentar.');
+    return;
+  }
+  if (token !== sheetToken) return;
+  const available = state.routines.filter(record => !record.archived);
+  const archived = state.routines.filter(record => record.archived);
+  openSheet(`<div class="routine-catalog">
+    <div class="routine-catalog-heading"><span class="eyebrow">Biblioteca de entrenamiento</span><h2>Mis rutinas</h2><p>Importa los planes que te den en el gym. Conservamos sus ejercicios para que después puedas crear nuevas rutinas con ellos.</p></div>
+    ${state.routineConflict ? '<p class="notice warn" role="alert">Hay varias rutinas marcadas como activas. Elige una para resolverlo; las otras y tu historial se conservarán.</p>' : ''}
+    <div class="routine-catalog-list">${available.length ? available.map(record => routineCard(record)).join('') : '<div class="routine-catalog-empty"><span>+</span><strong>Aún no tienes rutinas guardadas</strong><small>Importa un PDF o crea la primera desde cero.</small></div>'}</div>
+    ${archived.length ? `<details class="routine-archive"><summary>Archivadas · ${archived.length}</summary>${archived.map(record => routineCard(record, true)).join('')}</details>` : ''}
+    <div class="routine-catalog-actions"><button class="btn btn-primary" id="btn-catalog-import">Importar rutina del gym</button><button class="btn btn-ghost" id="btn-catalog-generate">Crear rutina con mis ejercicios</button><button class="btn btn-ghost" id="btn-catalog-new">Crear desde cero</button></div>
+  </div>`);
+  $('#btn-catalog-import').onclick = openImportRoutine;
+  $('#btn-catalog-new').onclick = openBlankRoutine;
+  $('#btn-catalog-generate').onclick = () => openRoutineGenerator();
+  $$('[data-routine-open]').forEach(button => { button.onclick = () => activateRoutine(button.dataset.routineOpen); });
+  $$('[data-routine-edit]').forEach(button => { button.onclick = () => {
+    const record = state.routines.find(item => item.id === button.dataset.routineEdit);
+    if (record) openEditor(record.days, [], { routineId: record.id, name: record.name, activate: record.active, source: record.source || 'manual' });
+  }; });
+  $$('[data-routine-duplicate]').forEach(button => { button.onclick = () => duplicateRoutine(button.dataset.routineDuplicate); });
+  $$('[data-routine-archive]').forEach(button => { button.onclick = () => archiveRoutine(button.dataset.routineArchive); });
+  $$('[data-routine-restore]').forEach(button => { button.onclick = () => changeRoutineArchive(button.dataset.routineRestore, false); });
+}
+
+function exerciseKindLabel(kind) {
+  return kind === 'check' ? 'Marca o tiempo' : 'Registro de peso';
+}
+
+function exerciseGroupKey(record) {
+  return record.muscleGroup && MUSCLE_GROUPS[record.muscleGroup] ? record.muscleGroup : exerciseFocus(record);
+}
+
+function exerciseGroupLabel(record) {
+  const group = exerciseGroupKey(record);
+  return record.muscleGroup && MUSCLE_GROUPS[record.muscleGroup] ? MUSCLE_GROUPS[group] : group === 'none' ? 'Enfoque automático' : `Automático · ${MUSCLE_GROUPS[group]}`;
+}
+
+function exerciseSourceSet(record) {
+  return new Set(Array.isArray(record.sources) && record.sources.length ? record.sources : [record.source].filter(Boolean));
+}
+
+function allExerciseRecords() {
+  return [
+    ...EXERCISE_CATALOG.map(record => ({ ...record, source: 'catalog', sources: ['catalog'] })),
+    ...personalExerciseViews()
+  ];
+}
+
+function personalExerciseViews() {
+  const groups = new Map();
+  const ignored = new Set(['id', 'createdAt', 'updatedAt', 'importedAt', 'importedRoutineIds', 'createdRoutineIds', 'restoredRoutineIds']);
+  for (const record of state.exercises) {
+    const signature = JSON.stringify(Object.fromEntries(Object.entries(record).filter(([key]) => !ignored.has(key)).sort(([a], [b]) => a.localeCompare(b))));
+    const previous = groups.get(signature);
+    if (!previous) { groups.set(signature, { ...record, duplicateCount: 1 }); continue; }
+    previous.duplicateCount++;
+    for (const key of ['importedRoutineIds', 'createdRoutineIds', 'restoredRoutineIds']) {
+      previous[key] = [...new Set([...(Array.isArray(previous[key]) ? previous[key] : []), ...(Array.isArray(record[key]) ? record[key] : [])])];
     }
   }
-  const saved = (await db.allRoutines()).find(r => r.id === ROUTINE_ID);
-  if (newCycle) await db.putRoutine({ id: `cycle-${oldCycle === 'legacy' ? uid() : oldCycle}`, name: state.routine[0]?.cycleName || 'Historial sin ciclo', days: structuredClone(state.routine), active: false });
-  await db.putRoutine({ id: ROUTINE_ID, name: name || 'Mi rutina', days: clean, active: true, ...(saved?.profile ? { profile: saved.profile } : {}) });
-  state.routineUpdatedAt = Date.now();
-  state.routine = clean;
-  state.routineId = ROUTINE_ID;
-  return newCycle ? oldCycle : null;
+  return [...groups.values()];
+}
+
+function exerciseRecordPriority(record) {
+  if (record.favorite) return -1;
+  const sources = exerciseSourceSet(record);
+  if (sources.has('imported')) return 0;
+  if (sources.has('restored')) return 0;
+  if (sources.has('private')) return 1;
+  return 2;
+}
+
+function pickerExerciseRecords() {
+  const unique = new Map();
+  for (const record of allExerciseRecords().sort((first, second) => exerciseRecordPriority(first) - exerciseRecordPriority(second) || first.name.localeCompare(second.name, 'es'))) {
+    const key = record.nameKey || exerciseNameKey(record.name);
+    if (!unique.has(key)) unique.set(key, record);
+  }
+  return [...unique.values()];
+}
+
+function exerciseSourceLabel(record) {
+  if (record.source === 'catalog') return 'Catálogo REAWAKEN';
+  const sources = exerciseSourceSet(record);
+  if (sources.has('imported') && sources.has('private')) return 'Tuyo · también importado';
+  if (sources.has('imported') || record.source === 'import') return 'Importado de una rutina';
+  if (sources.has('restored')) return 'Desde una rutina guardada';
+  return 'Creado por ti';
+}
+
+function exerciseEquipmentValues() {
+  return [...new Set([
+    ...EXERCISE_CATALOG.map(record => record.equipment),
+    ...state.exercises.map(record => record.equipment)
+  ].filter(Boolean))].sort((first, second) => first.localeCompare(second, 'es'));
+}
+
+function exerciseCard(record, lastUsed) {
+  const action = record.source === 'catalog'
+    ? `<button class="routine-card-action" data-exercise-copy="${esc(record.id)}" aria-label="Crear ficha personal de ${esc(record.name)}" title="Crear ficha personal">${ED_ICON.plus}</button>`
+    : `<button class="routine-card-action" data-exercise-edit="${esc(record.id)}" aria-label="Editar ${esc(record.name)}" title="Editar">${ED_ICON.edit}</button>`;
+  const details = [record.gym, record.zone, ...(Array.isArray(record.tags) ? record.tags : [])].filter(Boolean);
+  return `<article class="exercise-card">
+    <div class="exercise-card-copy"><strong>${record.favorite ? '<span class="exercise-favorite" aria-label="Favorito">★</span> ' : ''}${esc(record.name)}</strong><small>${esc(exerciseGroupLabel(record))} · ${esc(exerciseKindLabel(record.kind))}${record.equipment ? ` · ${esc(record.equipment)}` : ''}</small>${details.length ? `<small>${esc(details.join(' · '))}</small>` : ''}${lastUsed ? `<small>Último registro con este nombre: ${fmtDate(lastUsed, { day: 'numeric', month: 'short' })}</small>` : ''}<span class="exercise-card-source">${esc(exerciseSourceLabel(record))}</span>${record.duplicateCount > 1 ? `<small>${record.duplicateCount} fichas idénticas agrupadas · sin borrar registros</small>` : ''}</div>
+    ${action}
+  </article>`;
+}
+
+function renderExerciseLibrary() {
+  const query = exerciseNameKey($('#exercise-search')?.value || '');
+  const source = $('#exercise-source')?.value || 'all';
+  const group = $('#exercise-group-filter')?.value || 'all';
+  const equipment = $('#exercise-equipment-filter')?.value || 'all';
+  const organization = $('#exercise-organization')?.value || 'all';
+  const dates = new Map();
+  for (const session of state.sessions.filter(item => item.finishedAt && !item.deletedAt)) {
+    for (const movement of session.routineSnapshot?.blocks.flatMap(block => block.movements) || []) {
+      if (session.entries?.[movement.id]?.some(recordedSet)) {
+        const key = exerciseNameKey(movement.name);
+        dates.set(key, Math.max(dates.get(key) || 0, session.startedAt));
+      }
+    }
+  }
+  const records = allExerciseRecords().filter(record => {
+    const sources = exerciseSourceSet(record);
+    const searchable = [record.name, record.gym, record.zone, ...(Array.isArray(record.tags) ? record.tags : [])].filter(Boolean).join(' ');
+    return (!query || exerciseNameKey(searchable).includes(query)) &&
+      (organization === 'all' || (organization === 'favorites' ? record.favorite : organization.startsWith('gym:') && record.gym === organization.slice(4))) &&
+      (source === 'all' || (source === 'catalog' ? record.source === 'catalog' : sources.has(source) || (source === 'imported' && record.source === 'import'))) &&
+      (group === 'all' || exerciseGroupKey(record) === group) &&
+      (equipment === 'all' || (equipment === 'none' ? !record.equipment : record.equipment === equipment));
+  }).sort((first, second) => Number(Boolean(second.favorite)) - Number(Boolean(first.favorite)) || first.name.localeCompare(second.name, 'es'));
+  $('#exercise-library-count').textContent = `${records.length} ${records.length === 1 ? 'ejercicio visible' : 'ejercicios visibles'}`;
+  $('#exercise-library-list').innerHTML = records.length
+    ? records.map(record => exerciseCard(record, dates.get(exerciseNameKey(record.name)))).join('')
+    : '<div class="exercise-library-empty"><span>⌕</span><strong>No hay coincidencias</strong><small>Prueba otro nombre, enfoque u origen.</small></div>';
+  $$('[data-exercise-edit]').forEach(button => {
+    button.onclick = () => openExerciseForm(state.exercises.find(item => item.id === button.dataset.exerciseEdit));
+  });
+  $$('[data-exercise-copy]').forEach(button => {
+    button.onclick = () => openExerciseForm(null, EXERCISE_CATALOG.find(item => item.id === button.dataset.exerciseCopy));
+  });
+}
+
+function openExercisePicker(blockIndex, movementIndex) {
+  const movement = edDay()?.blocks[blockIndex]?.movements[movementIndex];
+  if (!movement) return;
+  openSheet(`<div class="exercise-picker">
+    <div class="exercise-library-heading"><span class="eyebrow">REAWAKEN · Biblioteca</span><h2>Elegir ejercicio</h2><p>Tus importados aparecen primero; el catálogo base queda disponible debajo.</p></div>
+    <label class="field"><span>Buscar</span><input id="exercise-picker-search" autocomplete="off" placeholder="Nombre del ejercicio"></label>
+    <p class="exercise-library-count" id="exercise-picker-count"></p>
+    <div class="exercise-picker-list" id="exercise-picker-list"></div>
+    <button class="btn btn-ghost exercise-picker-manual" id="exercise-picker-manual" type="button">Escribir manualmente</button>
+  </div>`);
+
+  const render = () => {
+    const query = exerciseNameKey($('#exercise-picker-search')?.value || '');
+    const records = pickerExerciseRecords()
+      .filter(record => !query || exerciseNameKey(record.name).includes(query));
+    $('#exercise-picker-count').textContent = `${records.length} ${records.length === 1 ? 'coincidencia' : 'coincidencias'}`;
+    $('#exercise-picker-list').innerHTML = records.length ? records.map(record => `<button class="exercise-picker-option" type="button" data-pick-exercise="${esc(record.id)}">
+      <span><strong>${esc(record.name)}</strong><small>${esc(exerciseGroupLabel(record))} · ${esc(exerciseKindLabel(record.kind))}${record.equipment ? ` · ${esc(record.equipment)}` : ''}</small></span><span aria-hidden="true">›</span>
+    </button>`).join('') : '<div class="exercise-library-empty"><span>⌕</span><strong>No hay coincidencias</strong><small>Prueba otro nombre.</small></div>';
+    $$('#exercise-picker-list [data-pick-exercise]').forEach(button => {
+      button.onclick = () => {
+        const record = records.find(item => item.id === button.dataset.pickExercise);
+        if (!record) return;
+        const target = edDay()?.blocks[blockIndex]?.movements[movementIndex];
+        if (!target) return closeSheet();
+        target.name = record.name;
+        target.muscleGroup = record.muscleGroup || '';
+        target.kind = record.kind === 'check' ? 'check' : 'weight';
+        if (Number.isFinite(record.timer)) target.timer = record.timer;
+        else delete target.timer;
+        if (record.equipment) target.equipment = record.equipment;
+        else delete target.equipment;
+        edTouch();
+        closeSheet();
+        refreshEdDay();
+        toast('Ejercicio seleccionado');
+      };
+    });
+  };
+  render();
+  $('#exercise-picker-search').oninput = render;
+  $('#exercise-picker-manual').onclick = closeSheet;
+}
+
+function openExerciseLibrary() {
+  openSheet(`<div class="exercise-library">
+    <div class="exercise-library-heading"><span class="eyebrow">Tu biblioteca de ejercicios</span><h2>Ejercicios</h2><p>Los ejercicios de tus rutinas guardadas se reúnen aquí para reutilizarlos. El catálogo es una fuente opcional.</p></div>
+    <p class="training-caption" id="library-storage-note">Las rutinas incluyen sus ejercicios al sincronizar. Los favoritos, las etiquetas y los cambios de estas fichas se guardan en este dispositivo y en tu respaldo JSON; todavía no se sincronizan.</p>
+    <div class="exercise-library-filters">
+      <label class="field"><span>Buscar</span><input id="exercise-search" autocomplete="off" placeholder="Nombre del ejercicio"></label>
+      <div class="field-grid">
+        <label class="field"><span>Origen</span><select id="exercise-source"><option value="all">Todos</option><option value="catalog">Catálogo base</option><option value="imported">Importados</option><option value="restored">De rutinas guardadas</option><option value="private">Creados por ti</option></select></label>
+        <label class="field"><span>Enfoque</span><select id="exercise-group-filter"><option value="all">Todos</option>${Object.entries(MUSCLE_GROUPS).map(([key, label]) => `<option value="${key}">${esc(label)}</option>`).join('')}</select></label>
+      </div>
+      <label class="field"><span>Equipo</span><select id="exercise-equipment-filter"><option value="all">Todos</option><option value="none">Sin equipo indicado</option>${exerciseEquipmentValues().map(equipment => `<option value="${esc(equipment)}">${esc(equipment)}</option>`).join('')}</select></label>
+      <label class="field"><span>Mi organización</span><select id="exercise-organization"><option value="all">Todos</option><option value="favorites">Favoritos</option>${[...new Set(state.exercises.map(record => record.gym).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'es')).map(gym => `<option value="gym:${esc(gym)}">${esc(gym)}</option>`).join('')}</select></label>
+    </div>
+    <p class="exercise-library-count" id="exercise-library-count"></p>
+    <div class="exercise-library-list" id="exercise-library-list"></div>
+    <button class="btn btn-primary exercise-library-add" id="btn-exercise-new">${ED_ICON.plus} Nuevo ejercicio</button>
+  </div>`);
+  renderExerciseLibrary();
+  $('#exercise-search').oninput = renderExerciseLibrary;
+  $('#exercise-source').onchange = renderExerciseLibrary;
+  $('#exercise-group-filter').onchange = renderExerciseLibrary;
+  $('#exercise-equipment-filter').onchange = renderExerciseLibrary;
+  $('#exercise-organization').onchange = renderExerciseLibrary;
+  $('#btn-exercise-new').onclick = () => openExerciseForm();
+}
+
+async function openExerciseForm(existing = null, preset = null) {
+  const token = sheetToken;
+  if (existing) {
+    try {
+      existing = await db.getExercise(existing.id);
+      if (!existing || existing.deletedAt) throw new Error('Esta ficha ya no está disponible.');
+    } catch (error) {
+      console.error('No se pudo abrir la ficha.', error);
+      toast(error.message);
+      return;
+    }
+    if (token !== sheetToken) return;
+  }
+  const base = existing || preset || {};
+  const expected = existing ? JSON.stringify(existing) : null;
+  const groupOptions = Object.entries(MUSCLE_GROUPS).map(([key, label]) => `<option value="${key}" ${base.muscleGroup === key ? 'selected' : ''}>${esc(label)}</option>`).join('');
+  openSheet(`<div class="exercise-form">
+    <span class="eyebrow">Biblioteca personal</span>
+    <h2>${existing ? 'Editar ejercicio' : 'Nuevo ejercicio'}</h2>
+    <p>Esta ficha es privada y no cambia ejercicios ni marcas anteriores. Para otra máquina usa un nombre que la distinga; no necesitas indicar kg o lb.</p>
+    <form id="exercise-form">
+      <div class="field"><label for="exercise-name">Nombre</label><input id="exercise-name" maxlength="100" autocomplete="off" required value="${esc(base.name || '')}" placeholder="Ej. Press de pecho · máquina A"></div>
+      <div class="field-grid">
+        <div class="field"><label for="exercise-group">Enfoque</label><select id="exercise-group"><option value="" ${!base.muscleGroup ? 'selected' : ''}>Automático</option>${groupOptions}</select></div>
+        <div class="field"><label for="exercise-kind">Registro</label><select id="exercise-kind"><option value="weight" ${base.kind !== 'check' ? 'selected' : ''}>Peso</option><option value="check" ${base.kind === 'check' ? 'selected' : ''}>Marca / tiempo</option></select></div>
+      </div>
+      <div class="field"><label for="exercise-equipment">Equipo</label><input id="exercise-equipment" maxlength="60" autocomplete="off" value="${esc(base.equipment || '')}" placeholder="Ej. Mancuernas, polea o peso corporal"></div>
+      <details class="exercise-organization-fields"><summary>Mi gym y etiquetas · opcional</summary><div class="field-grid">
+        <div class="field"><label for="exercise-gym">Mi lugar o colección</label><input id="exercise-gym" maxlength="60" value="${esc(base.gym || '')}" placeholder="Ej. Mi gym"></div>
+        <div class="field"><label for="exercise-zone">Zona o piso</label><input id="exercise-zone" maxlength="60" value="${esc(base.zone || '')}" placeholder="Ej. Planta baja"></div></div>
+        <div class="field"><label for="exercise-tags">Etiquetas separadas por comas</label><input id="exercise-tags" maxlength="200" value="${esc(Array.isArray(base.tags) ? base.tags.join(', ') : base.tags || '')}" placeholder="Ej. pierna, movilidad"></div>
+        <label class="preference-check"><input id="exercise-favorite" type="checkbox" ${base.favorite ? 'checked' : ''}><span>Favorito · mostrar primero</span></label></details>
+      <p id="exercise-error" class="correction-error" role="alert"></p>
+      <div class="sheet-form-actions"><button class="btn btn-primary" type="submit" id="exercise-save">${existing ? 'Guardar cambios' : 'Guardar ejercicio'}</button><button class="btn btn-ghost" type="button" id="exercise-cancel">Cancelar</button></div>
+    </form>
+  </div>`);
+  $('#exercise-cancel').onclick = closeSheet;
+  const form = $('#exercise-form');
+  let saving = false;
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (saving) return;
+    const name = $('#exercise-name').value.trim();
+    if (!name) return toast('Escribe un nombre para el ejercicio');
+    const errorLabel = $('#exercise-error');
+    const controls = [...form.querySelectorAll('button, input, select'), $('#sheet .sheet-dismiss')];
+    let committed = false;
+    let restoreControls;
+    try {
+      const now = Date.now();
+      const record = {
+        ...(existing || {}),
+        id: existing?.id || `exercise-${uid()}`,
+        name,
+        muscleGroup: $('#exercise-group').value,
+        kind: $('#exercise-kind').value,
+        equipment: $('#exercise-equipment').value.trim(),
+        gym: $('#exercise-gym').value.trim(),
+        zone: $('#exercise-zone').value.trim(),
+        tags: [...new Set($('#exercise-tags').value.split(',').map(tag => tag.trim()).filter(Boolean))],
+        favorite: $('#exercise-favorite').checked,
+        ...(preset ? { catalogId: preset.id } : {}),
+        source: existing?.source || 'private',
+        sources: existing?.sources || [existing?.source || 'private'],
+        nameKey: exerciseNameKey(name),
+        createdAt: existing?.createdAt || now,
+        updatedAt: now
+      };
+      saving = sheetBusy = true;
+      restoreControls = freezeControls(controls);
+      await db.updateRoutineLibrary(({ exercises }) => {
+        const current = exercises.find(item => item.id === record.id);
+        if ((current ? JSON.stringify(current) : null) !== expected) throw new Error('Esta ficha cambió en otra ventana. Vuelve a abrirla antes de guardar.');
+        if ((!existing || exerciseNameKey(existing.name) !== record.nameKey) &&
+            exercises.some(item => !item.deletedAt && item.id !== record.id && exerciseNameKey(item.name) === record.nameKey)) {
+          throw new Error('Ese ejercicio ya está en tu biblioteca. Usa un nombre distinto para identificar otro equipo.');
+        }
+        return { exercises: [record] };
+      });
+      committed = true;
+      state.exercises = (await db.allExercises()).filter(record => !record.deletedAt);
+      await renderSettings();
+      sheetBusy = false;
+      openExerciseLibrary();
+      toast(existing ? 'Ejercicio actualizado' : 'Ejercicio guardado');
+    } catch (error) {
+      console.error('No se pudo guardar la ficha personal.', error);
+      errorLabel.textContent = committed ? 'La ficha se guardó, pero no se pudo actualizar la pantalla. Vuelve a abrir la app.' : error.message || 'No se pudo guardar el ejercicio.';
+    } finally {
+      saving = sheetBusy = false;
+      restoreControls?.();
+    }
+  };
 }
 
 function openImportRoutine() {
@@ -1071,8 +1941,7 @@ function openImportRoutine() {
       return;
     }
     closeSheet();
-    openEditor(days, [...extraWarnings, ...warnings]);
-    $('#ed-new-cycle').checked = true;
+    openEditor(days, [...extraWarnings, ...warnings], { name: 'Rutina importada', activate: true, source: 'import' });
     edTouch();  // lo interpretado todavía no existe en disco: salir sin guardar debe avisar
     toast(`${days.length} días interpretados · revísalos`);
   };
@@ -1102,8 +1971,14 @@ function openImportRoutine() {
   };
 }
 
-function openEditor(days, warnings = []) {
-  $('#ed-new-cycle').checked = false;
+function openEditor(days, warnings = [], options = {}) {
+  $('#ed-new-cycle').checked = options.newCycle === true;
+  state.draftRoutineId = options.routineId || `routine-${uid()}`;
+  state.draftBaseline = { id: state.draftRoutineId, revision: state.routineRevisions.get(state.draftRoutineId) || null };
+  state.draftRoutineName = options.name || 'Nueva rutina';
+  state.draftActivate = options.activate !== false;
+  state.draftSource = options.source || 'manual';
+  state.draftGeneration = options.generation || null;
   state.draft = JSON.parse(JSON.stringify(days));
   state.draftWarnings = warnings;
   state.edDay = 0;
@@ -1113,11 +1988,14 @@ function openEditor(days, warnings = []) {
 }
 
 const ED_ICON = {
-  copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4H4v12h4"/></svg>',
+  edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg>',
+  duplicate: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4H4v12h4"/></svg>',
+  restore: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 109-9 9 9 0 00-6.4 2.7L3 8"/><path d="M3 3v5h5"/></svg>',
   up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V6M6 12l6-6 6 6"/></svg>',
   down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v13M6 12l6 6 6-6"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 7V5h4v2M6.5 7l.9 12.1A1 1 0 008.4 20h7.2a1 1 0 001-.9L17.5 7"/></svg>',
-  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>'
+  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  library: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>'
 };
 
 /** Día que se está editando ahora mismo. */
@@ -1146,6 +2024,8 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 function renderEditor() {
   state.edDay = Math.min(Math.max(state.edDay || 0, 0), Math.max(state.draft.length - 1, 0));
+  $('#ed-routine-name').value = state.draftRoutineName;
+  $('#ed-activate-routine').checked = state.draftActivate;
   renderEdHeader();
   renderEdTabs();
   renderEdDay();
@@ -1188,6 +2068,7 @@ function edMovementHtml(bi, mi, m, count) {
       <div class="ed-mv-top">
         <span class="ed-mvnum">${mi + 1}</span>
         <input class="ed-name" data-path="m.${p}.name" value="${esc(m.name)}" placeholder="Nombre del ejercicio" aria-label="Nombre del ejercicio ${mi + 1}" />
+        <button class="ed-picker-trigger" data-pick-mv="${p}" type="button" aria-label="Elegir ejercicio ${mi + 1}" title="Elegir de la biblioteca">${ED_ICON.library}</button>
       </div>
       <div class="ed-mv-row">
         <label class="ed-field ed-field-reps"><span>Reps del plan</span>
@@ -1243,7 +2124,7 @@ function renderEdDay() {
         <span class="ed-bnum">Bloque ${bi + 1}</span>
         <span class="ed-bmeta">${plural(b.movements.length, 'ejercicio', 'ejercicios')} · ${plural(b.sets, 'serie', 'series')}</span>
         <div class="ed-tools">
-          <button class="ed-icon" data-copy-block="${bi}" aria-label="Duplicar bloque" title="Duplicar bloque">${ED_ICON.copy}</button>
+          <button class="ed-icon" data-copy-block="${bi}" aria-label="Duplicar bloque" title="Duplicar bloque">${ED_ICON.duplicate}</button>
           <button class="ed-icon" data-move-block="${bi}" data-dir="-1" ${bi === 0 ? 'disabled' : ''} aria-label="Subir bloque">${ED_ICON.up}</button>
           <button class="ed-icon" data-move-block="${bi}" data-dir="1" ${bi === day.blocks.length - 1 ? 'disabled' : ''} aria-label="Bajar bloque">${ED_ICON.down}</button>
           <button class="ed-icon danger" data-del-block="${bi}" aria-label="Eliminar bloque">${ED_ICON.trash}</button>
@@ -1319,6 +2200,18 @@ function edRemove(label, restore, remove) {
 
 const newMovement = () => ({ id: uid(), name: '', reps: '10', kind: 'weight' });
 
+const newRoutineDay = number => ({
+  id: uid(), label: `Día ${number}`, title: '', subtitle: '',
+  accent: DAY_ACCENTS[(number - 1) % DAY_ACCENTS.length],
+  blocks: [{ id: uid(), floor: null, sets: 3, movements: [newMovement()] }]
+});
+
+function openBlankRoutine() {
+  openEditor([newRoutineDay(1)], [], { name: 'Nueva rutina', activate: true, source: 'manual' });
+  edTouch();
+  toast('Rutina nueva · agrega tu primer ejercicio');
+}
+
 function bindEditor() {
   const body = $('#ed-body');
 
@@ -1382,6 +2275,11 @@ function bindEditor() {
       });
       el.closest('.ed-mv').querySelector('.ed-timing').hidden = el.dataset.k !== 'time';
       edTouch(); haptic();
+      return;
+    }
+    if ((el = hit('data-pick-mv'))) {
+      const [blockIndex, movementIndex] = el.dataset.pickMv.split('.').map(Number);
+      openExercisePicker(blockIndex, movementIndex);
       return;
     }
     if ((el = hit('data-note'))) {
@@ -1464,11 +2362,7 @@ function bindEditor() {
     if (tab) { haptic(); edGoToDay(+tab.dataset.dayTab); return; }
     if (e.target.closest('[data-add-day]')) {
       const n = Math.max(state.draft.length, ...state.draft.map(day => Number(day.label.match(/\d+/)?.[0]) || 0)) + 1;
-      state.draft.push({
-        id: uid(), label: `Día ${n}`, title: '', subtitle: '',
-        accent: DAY_ACCENTS[(n - 1) % DAY_ACCENTS.length],
-        blocks: [{ id: uid(), floor: null, sets: 3, movements: [newMovement()] }]
-      });
+      state.draft.push(newRoutineDay(n));
       state.edDay = state.draft.length - 1;
       edTouch(); haptic();
       renderEditor();
@@ -1720,7 +2614,7 @@ function openNewMeasure() {
   $('#btn-parse').onclick = () => {
     const txt = $('#paste-area').value;
     if (!txt.trim()) return toast('Pega primero el texto');
-    const lastHeight = state.measures.at(-1)?.values.height || PROFILE.height;
+    const lastHeight = state.measures.at(-1)?.values.height;
     const { values, at, missing, fixed } = parseInBody(txt, lastHeight);
     const found = INBODY_FIELDS.length - missing.length;
     if (!found) return toast('No reconocí ningún dato. Revisa el texto o captúralo a mano.');
@@ -1861,6 +2755,12 @@ function achievementState() {
 
 function openFunctions() {
   const topics = [
+    ['Crear rutina con mis ejercicios', 'De tus planes del gym a un borrador propio', 'Importa el PDF o texto del gym, revísalo y guarda la rutina. Después, en Mis rutinas, puedes crear una propuesta usando por defecto solo los ejercicios de tus planes guardados. Incluir fichas personales o catálogo requiere elegir esa fuente. El borrador se revisa en el editor y se guarda como una rutina nueva, inicialmente inactiva.', 'No usa IA ni prescribe cargas. Conserva series, reps y descansos de las fuentes y avisa si faltan opciones. Las rutinas sincronizadas incluyen sus ejercicios; los favoritos y demás detalles de las fichas solo están en este dispositivo y en el respaldo JSON.', null],
+    ['Descanso y pantalla', 'Tus preferencias, sin tocar el plan', 'Desde Ajustes o el menú del entrenamiento puedes guardar 30, 45, 60 segundos o un valor personalizado. El descanso del bloque tiene prioridad; cambiar la preferencia no reinicia el contador actual. La pantalla puede mantenerse despierta durante la vista de entrenamiento si activas la opción y el navegador lo permite.', 'El descanso sigue siendo silencioso. El sistema puede liberar la pantalla y no se garantiza en segundo plano. Estas preferencias se conservan en respaldos, pero todavía no se sincronizan con Supabase.', null],
+    ['Mi gym y favoritos', 'Fichas privadas y fáciles de encontrar', 'En Ejercicios puedes crear una ficha personal desde el catálogo o editar una tuya. Lugar o colección, zona, etiquetas y favoritos son opcionales. Los favoritos aparecen primero en el selector; puedes buscar por estos campos y filtrar por lugar. El último registro se obtiene del historial con ese nombre.', 'No modifica rutinas ni marcas anteriores, no adivina unidades ni confirma disponibilidad de equipo. Usa nombres diferentes para distinguir máquinas; las fichas se conservan en el respaldo, no se sincronizan todavía.', null],
+    ['Actividad anual', 'Tu constancia en doce meses', 'En Historial, Tu año de entrenamiento reúne las sesiones finalizadas por mes. Elige otro año o toca un mes para abrir sus fechas y registros. Varias sesiones el mismo día cuentan por separado, pero ese día cuenta una sola vez como activo.', 'Es actividad registrada, no intensidad ni cumplimiento de objetivos. No borra ni reinicia el historial al cambiar de año.', null],
+    ['Progreso por ejercicio', 'Tus cargas a lo largo del tiempo', 'Desde Historial abre Tu progreso por ejercicio, busca un movimiento y consulta su curva y sus sesiones. Cada punto es la mayor carga registrada en una sesión con las mismas reps y contexto. Al terminar también verás los PR superados, con marca anterior y nueva; solo se muestra el mejor de cada contexto. No necesitas identificar kg o lb para seguir el número de tu equipo habitual.', 'No es un nivel de fuerza ni una estimación de 1RM. No puede detectar un cambio de máquina o unidad que no registraste; tampoco inventa metadatos de sesiones antiguas. Corregir o borrar registros recalcula estas referencias sin repetir celebraciones.', null],
+    ['Corregir pesos anteriores', 'Una serie, sin rehacer el entrenamiento', 'Abre una fecha en Historial, entra a la sesión y toca Corregir debajo del peso. Revisa el valor anterior, escribe el correcto y guarda. La fecha, las reps, las notas, el resto de las series y los datos del equipo se conservan. Los récords y la curva vuelven a calcularse desde el historial corregido.', 'Cancelar no guarda. Si otro dispositivo o ventana cambió el registro local, debes volver a abrirlo; un error conserva el valor escrito para reintentar. Guardado local no significa sincronización remota confirmada.', null],
     ['Rutina desde PDF', 'Del documento a un plan editable', 'Carga el PDF de tu coach: la app extrae los días, ejercicios, series y reps en este dispositivo. Revisa los avisos y corrige el resultado antes de guardar. Un nuevo ciclo separa el balance del plan anterior sin cambiar tus sesiones pasadas.', 'Necesita un PDF con texto; para un escaneo usa Live Text y pega el contenido. No interpreta todos los diseños ni sustituye la revisión.', 'guide-pdf.png'],
     ['Sugerencias de carga', 'Subir, mantener o bajar; sin cifras', 'Puede sugerir subir tras tres entrenamientos completos en días distintos, con todas las series en las reps altas del plan y la misma carga registrada. Busca en las últimas seis semanas y exige un registro en las últimas dos. Si la última serie quedó por debajo del objetivo, sugiere bajar; en ejercicios asistidos habla de más o menos ayuda.', 'No convierte kg y lb ni cambia el peso anterior del campo. Comprueba que sigues usando el mismo equipo y unidad: no puede detectar un cambio que no quedó registrado. Las reps precargadas no demuestran facilidad; sube solo si mantienes una técnica cómoda.', 'guide-load.png'],
     ['Muscle Battery', 'La carga reciente de cada grupo muscular', 'En Tu balance, Muscle Battery reúne las series de fuerza de tus sesiones finalizadas durante los últimos 14 días. Distribuye el trabajo entre músculos principales y secundarios y reduce su peso con el tiempo. Muestra tres estados: carga reciente elevada, recuperación en curso o menor carga reciente.', 'Es una estimación, no una batería real ni permiso para volver a entrenar. No conoce tu sueño, alimentación, dolor o fatiga; sin registros suficientes no puede valorar una zona. El registro sencillo no mide esfuerzo.', null],
@@ -1903,10 +2803,13 @@ function openAchievements() {
         }, () => {
           if (button.getAttribute('aria-expanded') !== 'true' || !$('#sheet-backdrop').classList.contains('show')) return;
           const sheet = $('#sheet');
-          const overflow = detail.getBoundingClientRect().bottom - sheet.getBoundingClientRect().bottom + 20;
-          if (overflow > 0) sheet.scrollBy({ top: overflow, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+          const bounds = detail.getBoundingClientRect();
+          const visibleTop = $('.sheet-toolbar').getBoundingClientRect().bottom + 12;
+          const overflow = bounds.bottom - sheet.getBoundingClientRect().bottom + 20;
+          const distance = Math.min(overflow, bounds.top - visibleTop);
+          if (distance > 1) sheet.scrollBy({ top: distance, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
         });
-        enterView(detail.firstElementChild);
+        enterView(detail.firstElementChild, 0);
       };
     });
   };
@@ -1922,34 +2825,127 @@ function openAchievements() {
   $('.path-node[aria-pressed="true"]').scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'instant' });
 }
 
-function openDurationEditor(session, onSaved) {
-  const totalMinutes = Math.min(1440, Math.max(1, Math.round(sessionDuration(session) / 60000)));
-  openSheet(`<h2>Duración del entrenamiento</h2><form id="duration-form"><div class="result-fields"><div class="field"><label for="duration-hours">Horas</label><input id="duration-hours" type="number" inputmode="numeric" min="0" max="24" step="1" required value="${Math.floor(totalMinutes / 60)}"></div><div class="field"><label for="duration-minutes">Minutos</label><input id="duration-minutes" type="number" inputmode="numeric" min="0" max="59" step="1" required value="${totalMinutes % 60}"></div></div><p id="duration-error" role="alert"></p><button class="btn btn-primary" type="submit">Guardar duración</button><button class="btn btn-ghost" id="duration-cancel" type="button">Cancelar</button></form>`);
-  $('#duration-cancel').onclick = onSaved;
-  $('#duration-form').onsubmit = async event => {
+async function sessionForCorrection(id) {
+  const original = await db.getSession(id);
+  if (!original || original.deletedAt || !original.finishedAt) {
+    throw new Error('Este entrenamiento ya no está disponible para corregirlo.');
+  }
+  return original;
+}
+
+function bindSessionCorrection(form, original, update, onSaved) {
+  const errorText = form.querySelector('[role="alert"]');
+  let saving = false;
+  form.onsubmit = async event => {
     event.preventDefault();
+    if (saving) return;
+    errorText.textContent = '';
+    let corrected;
+    try {
+      corrected = update(original);
+    } catch (error) {
+      errorText.textContent = error.message;
+      return;
+    }
+    const controls = [...form.querySelectorAll('button, input'), $('#sheet .sheet-dismiss')];
+    saving = true;
+    sheetBusy = true;
+    form.setAttribute('aria-busy', 'true');
+    const restoreControls = freezeControls(controls);
+    const submit = form.querySelector('[type="submit"]');
+    const label = submit.textContent;
+    submit.textContent = 'Guardando…';
+    let saved;
+    try {
+      saved = await db.updateSession(original, () => corrected);
+    } catch (error) {
+      console.error('No se pudo guardar la corrección del entrenamiento.', error);
+      errorText.textContent = error.name === 'SessionConflictError' ? error.message : 'No se pudo guardar. El valor sigue aquí; vuelve a intentarlo.';
+    } finally {
+      saving = false;
+      sheetBusy = false;
+      form.removeAttribute('aria-busy');
+      restoreControls();
+      submit.textContent = label;
+    }
+    if (!saved) return;
+    state.sessions = state.sessions.map(item => item.id === saved.id ? saved : item);
+    renderHistory();
+    renderHome();
+    if (state.session && state.view === 'workout') {
+      const scroll = window.scrollY;
+      renderBlocks(sessionDay(state.session));
+      updateWorkoutHeader();
+      window.scrollTo(0, scroll);
+    }
+    onSaved(saved);
+    toast('Corrección guardada · En este dispositivo.');
+    sync.syncQuietly();
+  };
+}
+
+async function openHistoryWeightEditor(id, movement, index, onSaved) {
+  const token = sheetToken;
+  let original;
+  try {
+    original = await sessionForCorrection(id);
+    correctSessionWeight(original, movement.id, index, original.entries?.[movement.id]?.[index]);
+  } catch (error) {
+    console.error('No se pudo abrir la corrección de peso.', error);
+    toast(error.message || 'No se pudo leer el entrenamiento. Intenta de nuevo.');
+    return;
+  }
+  if (token !== sheetToken) return;
+  const value = original.entries[movement.id][index];
+  const originalMovement = original.routineSnapshot?.blocks.flatMap(block => block.movements).find(item => item.id === movement.id) || movement;
+  openSheet(`<span class="eyebrow">Corregir una serie</span><h2>${esc(originalMovement.name)}</h2><p class="training-caption">${fmtDate(original.startedAt, { day: 'numeric', month: 'long', year: 'numeric' })} · Serie ${index + 1}</p><form id="history-weight-form" novalidate>
+    <div class="weight-before"><span>Peso anterior</span><b>${esc(value)}</b></div>
+    <label class="weight-correction-field" for="history-weight"><span>Peso correcto</span><input id="history-weight" type="text" inputmode="decimal" enterkeyhint="done" autocomplete="off" required value="${esc(value)}" aria-describedby="history-weight-help history-weight-error"></label>
+    <p class="training-caption" id="history-weight-help">Usa el número de tu equipo, sin convertir kg o lb. Solo cambia este peso; conservamos fecha, reps y el resto del entrenamiento.</p>
+    <p class="correction-error" id="history-weight-error" role="alert"></p>
+    <div class="sheet-form-actions"><button class="btn btn-primary" type="submit">Guardar peso</button><button class="btn btn-ghost" id="history-weight-cancel" type="button">Cancelar</button></div></form>`);
+  $('#history-weight-cancel').onclick = onSaved;
+  bindSessionCorrection($('#history-weight-form'), original, current => correctSessionWeight(current, movement.id, index, $('#history-weight').value), onSaved);
+}
+
+async function openDurationEditor(session, onSaved) {
+  const token = sheetToken;
+  let original;
+  try {
+    original = await sessionForCorrection(session.id);
+  } catch (error) {
+    console.error('No se pudo abrir la corrección de duración.', error);
+    toast(error.message || 'No se pudo leer el entrenamiento. Intenta de nuevo.');
+    return;
+  }
+  if (token !== sheetToken) return;
+  const totalMinutes = Math.min(1440, Math.max(1, Math.round(sessionDuration(original) / 60000)));
+  openSheet(`<h2>Duración del entrenamiento</h2><form id="duration-form" novalidate><div class="result-fields"><div class="field"><label for="duration-hours">Horas</label><input id="duration-hours" type="number" inputmode="numeric" min="0" max="24" step="1" required value="${Math.floor(totalMinutes / 60)}"></div><div class="field"><label for="duration-minutes">Minutos</label><input id="duration-minutes" type="number" inputmode="numeric" min="0" max="59" step="1" required value="${totalMinutes % 60}"></div></div><p id="duration-error" role="alert"></p><div class="sheet-form-actions"><button class="btn btn-primary" type="submit">Guardar duración</button><button class="btn btn-ghost" id="duration-cancel" type="button">Cancelar</button></div></form>`);
+  $('#duration-cancel').onclick = onSaved;
+  bindSessionCorrection($('#duration-form'), original, current => {
     const hoursInput = $('#duration-hours'), minutesInput = $('#duration-minutes');
     const hours = Number(hoursInput.value), remainder = Number(minutesInput.value);
     const minutes = hours * 60 + remainder;
     if (!hoursInput.validity.valid || !minutesInput.validity.valid || !Number.isInteger(hours) || !Number.isInteger(remainder) || minutes < 1 || minutes > 1440) {
-      $('#duration-error').textContent = 'Introduce una duración entre 1 minuto y 24 horas.';
-      return;
+      throw new Error('Introduce una duración entre 1 minuto y 24 horas.');
     }
-    const button = $('#duration-form [type="submit"]');
-    button.disabled = true;
-    const updated = { ...session, entries: { ...session.entries, _durationMinutes: minutes } };
-    try {
-      await db.putSession(updated);
-      Object.assign(session, updated);
-      state.sessions = state.sessions.map(item => item.id === session.id ? updated : item);
-      renderHistory();
-      onSaved();
-      sync.syncQuietly();
-    } catch {
-      button.disabled = false;
-      $('#duration-error').textContent = 'No se pudo guardar. Intenta de nuevo.';
-    }
-  };
+    return { ...current, entries: { ...current.entries, _durationMinutes: minutes } };
+  }, updated => {
+    Object.assign(session, updated);
+    onSaved();
+  });
+}
+
+function personalRecordsHtml(session) {
+  const records = sessionPersonalRecords(session, state.sessions);
+  if (!records.length) return '';
+  return `<section class="session-records"><span class="eyebrow">PR de esta sesión · ${records.length}</span><h3>Marcas que superaste</h3>${records.map(record => `<button class="record-highlight" data-record-movement="${esc(record.movementId)}" data-record-session="${esc(session.id)}"><span><strong>${esc(record.name)}</strong><small>${record.reps} reps · serie ${record.index + 1}${record.label !== 'Habitual' ? ` · ${esc(record.label)}` : ''}</small></span><span><b>${record.load}${record.unit === 'escala' ? '' : ` ${esc(record.unit)}`}</b><small>Antes: ${record.previous}</small></span></button>`).join('')}<p class="training-caption">Mismas reps y contexto registrado. Se recalcula si corriges o eliminas sesiones.</p></section>`;
+}
+
+function bindRecordLinks() {
+  $$('[data-record-movement]').forEach(button => {
+    button.onclick = () => openMovementHistory(button.dataset.recordMovement, button.dataset.recordSession);
+  });
 }
 
 function showWorkoutSummary(session, newlyUnlocked = [], celebrate = true) {
@@ -1962,17 +2958,21 @@ function showWorkoutSummary(session, newlyUnlocked = [], celebrate = true) {
     ${newlyUnlocked.length ? `<section class="trophy-celebration${celebrate ? ' celebrating' : ''}" role="status"><div class="trophy-confetti" aria-hidden="true">${Array.from({ length: 12 }, (_, index) => `<i style="--piece:${index}"></i>`).join('')}</div><img class="trophy-icon celebration-emblem" src="icons/trophy.svg" alt="" width="56" height="56"><span class="eyebrow">${newlyUnlocked.length === 1 ? 'Trofeo desbloqueado' : `${newlyUnlocked.length} trofeos desbloqueados`}</span><h3>${esc(newlyUnlocked[0].title)}</h3>${newlyUnlocked.length > 1 ? `<p>${newlyUnlocked.slice(1, 3).map(badge => esc(badge.title)).join(' · ')}</p>` : ''}${newlyUnlocked.length > 3 ? `<details><summary>Ver los otros ${newlyUnlocked.length - 3} trofeos</summary><p>${newlyUnlocked.slice(3).map(badge => esc(badge.title)).join(' · ')}</p></details>` : ''}</section>` : ''}
     <div class="session-score"><div><span>Progress score</span><strong>${progress.pct}<small>/100</small></strong></div><div class="score-context"><b>${progress.pct === 100 ? 'Plan completado' : 'Trabajo registrado'}</b><span>${progress.done} de ${progress.total} series</span>${change !== null ? `<small>${change > 0 ? '+' : ''}${change} puntos vs. sesión anterior</small>` : ''}</div></div>
     <div class="summary-grid"><div><b>${progress.done}</b><span>Series</span></div><div><b>${completedBlocks}/${day.blocks.length}</b><span>Bloques</span></div><div><b>${Math.round(sessionDuration(session) / 60000)}</b><span>Minutos</span></div></div>
+    <p class="training-caption" id="summary-save-status" role="status">Guardado en este dispositivo.</p>
+    ${personalRecordsHtml(session)}
     <button class="btn btn-ghost duration-edit" id="summary-duration">Editar duración</button>
     ${trainingUI.repChangesHtml([session])}
     <button class="btn btn-primary" id="sheet-ok">Listo</button><button class="btn btn-ghost" id="summary-achievements">Ver logros</button><button class="btn btn-ghost" id="summary-progress">Balance de la semana</button>`);
   $('#summary-duration').onclick = () => openDurationEditor(session, () => showWorkoutSummary(session, newlyUnlocked, false));
+  bindRecordLinks();
+  updateSaveStatus();
   $('#summary-achievements').onclick = openAchievements;
   $('#summary-progress').onclick = () => trainingUI.openProgress('week', session.startedAt);
   $('#sheet-ok').onclick = () => { closeSheet(); checkBackupReminder(); };
 }
 
 async function finishWorkout() {
-  if (!state.session || state.session.finishedAt) return;
+  if (!state.session || state.session.finishedAt || state.session.id === discardingSessionId) return;
   const s = state.session;
   const before = new Set(achievementState().badges.filter(badge => badge.unlocked).map(badge => badge.id));
   $('#btn-finish').disabled = true;
@@ -2000,6 +3000,7 @@ async function finishWorkout() {
 let sheetToken = 0;
 let sheetDismiss = null;
 let sheetFocus = null;
+let sheetBusy = false;
 
 function openSheet(html) {
   sheetToken++;
@@ -2032,6 +3033,7 @@ function openSheet(html) {
 }
 
 function closeSheet(accepted = false) {
+  if (sheetBusy) return;
   const backdrop = $('#sheet-backdrop');
   if (!backdrop.classList.contains('show')) return;
   // Soltar el foco antes de ocultar: si no, queda atrapado en contenido invisible.
@@ -2081,24 +3083,27 @@ function confirmSheet({ title, body, confirm, cancel, danger }) {
 /* ============================== Respaldo ============================== */
 
 async function buildBackup() {
+  const personalProfile = await db.getMeta('personalProfile');
   return {
     app: 'gymtrack',
-    version: 3,
+    version: 4,
     exportedAt: new Date().toISOString(),
     profile: state.profile.name,
-    sessions: state.sessions,
+    sessions: state.session ? [...state.sessions.filter(session => session.id !== state.session.id), structuredClone(state.session)] : state.sessions,
     measures: state.measures,
-    routines: await db.allRoutines()
+    routines: await db.allRoutines(),
+    exercises: await db.allExercises(),
+    preferences: trainingPreferences(await db.getMeta('trainingPreferences')),
+    ...(personalProfile ? { personalProfile } : {})
   };
 }
 
 async function exportBackup() {
-  const data = JSON.stringify(await buildBackup(), null, 2);
-  const stamp = new Date().toISOString().slice(0, 10);
-  const filename = `reawaken-respaldo-${stamp}.json`;
-  const file = new File([data], filename, { type: 'application/json' });
-
   try {
+    const data = JSON.stringify(await buildBackup(), null, 2);
+    const stamp = new Date().toISOString().slice(0, 10);
+    const filename = `reawaken-respaldo-${stamp}.json`;
+    const file = new File([data], filename, { type: 'application/json' });
     if (navigator.canShare?.({ files: [file] })) {
       await navigator.share({ files: [file], title: 'Respaldo REAWAKEN' });
     } else {
@@ -2112,48 +3117,68 @@ async function exportBackup() {
     renderSettings();
     toast('Respaldo generado');
   } catch (err) {
-    if (err?.name !== 'AbortError') toast('No se pudo exportar');
+    if (err?.name !== 'AbortError') {
+      console.error('No se pudo exportar el respaldo.', err);
+      toast('No se pudo exportar. Tus registros siguen aquí; vuelve a intentarlo.');
+    }
   }
 }
 
-async function importBackup(file) {
-  let parsed;
-  try {
-    parsed = JSON.parse(await file.text());
-  } catch {
-    return toast('Archivo no válido');
-  }
-  if (parsed?.app !== 'gymtrack' || !Array.isArray(parsed.sessions)) {
-    return toast('Ese archivo no es un respaldo de REAWAKEN');
-  }
-
-  const clean = parsed.sessions.filter(s =>
-    s && typeof s.id === 'string' && typeof s.dayId === 'string' &&
-    Number.isFinite(s.startedAt) && s.entries && typeof s.entries === 'object'
-  ).map(s => ({ ...s, notes: typeof s.notes === 'string' ? s.notes : '' }));
-  const cleanMeasures = (Array.isArray(parsed.measures) ? parsed.measures : []).filter(m =>
-    m && typeof m.id === 'string' && Number.isFinite(m.at) && m.values && typeof m.values === 'object'
-  );
-  const cleanRoutines = (Array.isArray(parsed.routines) ? parsed.routines : []).filter(r =>
-    r && typeof r.id === 'string' && Array.isArray(r.days) && r.days.length
-  );
-  if (!clean.length && !cleanMeasures.length && !cleanRoutines.length) return toast('El respaldo está vacío');
-
-  const ok = await confirmSheet({
-    title: 'Importar respaldo',
-    body: `Se fusionarán ${clean.length} sesiones, ${cleanMeasures.length} mediciones${cleanRoutines.length ? ' y tu rutina guardada' : ''} con lo que ya tienes. Lo que coincida por id se sobrescribe.`,
-    confirm: 'Importar',
-    cancel: 'Cancelar'
+let importingBackup = false;
+function chooseBackupRoutine(candidates) {
+  return new Promise(resolve => {
+    let selected = null;
+    openSheet(`<h2>Una rutina activa</h2><p>Al fusionar el respaldo quedarían varias activas. Elige cuál usar; todas las demás se conservan guardadas junto con tu historial.</p><form id="backup-routine-form"><div class="field"><label for="backup-active-routine">Rutina que quedará activa</label><select id="backup-active-routine" required><option value="">Elige una rutina</option>${candidates.map(record => `<option value="${esc(record.id)}">${esc(record.name || 'Rutina sin nombre')}</option>`).join('')}</select></div><div class="sheet-form-actions"><button class="btn btn-primary" type="submit">Continuar</button><button class="btn btn-ghost" id="backup-choice-cancel" type="button">Cancelar</button></div></form>`);
+    sheetDismiss = () => resolve(selected);
+    $('#backup-choice-cancel').onclick = () => closeSheet();
+    $('#backup-routine-form').onsubmit = event => {
+      event.preventDefault();
+      selected = $('#backup-active-routine').value;
+      closeSheet(true);
+    };
   });
-  if (!ok) return;
+}
 
-  for (const s of clean) await db.putSession(s);
-  for (const m of cleanMeasures) await db.putMeasure(m);
-  for (const r of cleanRoutines) await db.putRoutine({ ...r, days: sanitizeRoutine(r.days) });
-  await loadAll();
-  await loadRoutine();
-  renderHome(); renderBody(); renderHistory(); renderSettings();
-  toast('Respaldo importado');
+async function importBackup(file) {
+  if (importingBackup) return toast('Ya hay una importación en curso.');
+  const editing = () => state.session || state.edDirty || state.draft;
+  if (editing()) return toast('Termina la sesión o guarda los cambios del editor antes de importar.');
+  importingBackup = true;
+  let committed = false;
+  try {
+    let parsed;
+    try { parsed = JSON.parse(await file.text()); }
+    catch { return toast('Archivo no válido. No se importó nada.'); }
+    const prepared = prepareBackup(parsed);
+    const [expectedRoutines, sessions, measures, exercises, preferences, personalProfile] = await Promise.all([
+      db.allRoutines(), db.allSessions(), db.allMeasures(), db.allExercises(), db.getMeta('trainingPreferences'), db.getMeta('personalProfile')
+    ]);
+    const expectedState = { sessions, measures, exercises, preferences, personalProfile };
+    const candidates = backupActiveRoutines(expectedRoutines, prepared.routines);
+    const activeRoutineId = candidates.length > 1 ? await chooseBackupRoutine(candidates) : null;
+    if (candidates.length > 1 && !activeRoutineId) return;
+    const ok = await confirmSheet({
+      title: 'Importar respaldo',
+      body: `Se fusionarán ${prepared.sessions.length} sesiones, ${prepared.measures.length} mediciones, ${prepared.routines.length} rutinas y ${prepared.exercises.length} ejercicios. Los registros con el mismo ID se sobrescriben; los demás se conservan.${prepared.personalProfile ? ' También se restaurará el perfil y se aplicará a tu rutina activa sin cambiar sus ejercicios.' : ''}${prepared.preferences ? ' Se restaurarán las preferencias de entrenamiento incluidas.' : ''} No se importan credenciales.`,
+      confirm: 'Importar',
+      cancel: 'Cancelar'
+    });
+    if (!ok) return;
+    if (editing()) return toast('Termina la sesión o guarda los cambios del editor antes de importar.');
+    await db.restoreBackup(prepared, { activeRoutineId, expectedRoutines, expectedState });
+    committed = true;
+    await loadAll();
+    await loadRoutine();
+    await loadTrainingPreferences();
+    renderHome(); renderBody(); renderHistory();
+    await renderSettings();
+    toast('Respaldo importado');
+  } catch (error) {
+    toast(committed ? 'El respaldo se guardó, pero no se pudo actualizar la pantalla. Vuelve a abrir la app.' :
+      `No se importó nada. ${error?.message || 'Revisa el almacenamiento e inténtalo de nuevo.'}`);
+  } finally {
+    importingBackup = false;
+  }
 }
 
 async function checkBackupReminder() {
@@ -2249,7 +3274,7 @@ function openSyncSetup() {
   openSheet(`
     <div class="grabber"></div>
     <h2>Conectar Supabase</h2>
-    <p>En tu proyecto: <b>Project Settings → Data API</b> para la URL, y <b>API Keys</b> para la clave. Antes corre el archivo <b>sql/schema.sql</b> en el SQL Editor.</p>
+    <p>En tu proyecto existente: <b>Project Settings → Data API</b> para la URL y <b>API Keys</b> para la clave pública. Si lo compartes con otra app, revisa primero sus tablas y permisos; no ejecutes el esquema completo para conectar un dispositivo.</p>
     <div class="field" style="margin-bottom:10px">
       <label for="sb-url">Project URL</label>
       <input id="sb-url" placeholder="https://xxxxx.supabase.co" autocapitalize="off" autocorrect="off" spellcheck="false" style="font-size:16px" />
@@ -2306,6 +3331,7 @@ function openSyncLogin() {
         const r = await sync.syncAll();
         await loadAll(); await loadRoutine();
         renderHome(); renderBody(); renderHistory();
+        await renderSettings();
         toast(`Sincronizado · ${r.pulled} bajadas, ${r.pushed} subidas`);
       }
     } catch (e) {
@@ -2331,15 +3357,33 @@ async function forgetSync() {
 /* ---------- Ajustes ---------- */
 
 function renderInBodyReminder() {
+  const hasUserData = state.profile.name.trim() || state.routines.length || state.sessions.length || state.measures.length;
+  if (!hasUserData) {
+    $('#inbody-reminder').innerHTML = '';
+    $('#inbody-schedule').textContent = 'Disponible después de configurar tu perfil';
+    return;
+  }
   const reminder = monthlyInBody(state.measures);
   $('#inbody-reminder').innerHTML = reminder.due ? `<button class="routine-alert due" id="btn-inbody-reminder"><div><strong>Nuevo InBody · ${esc(fmtDate(reminder.next, { month: 'long' }))}</strong><small>Pendiente de este mes</small></div><span aria-hidden="true">+</span></button>` : '';
   if ($('#btn-inbody-reminder')) $('#btn-inbody-reminder').onclick = openNewMeasure;
   $('#inbody-schedule').textContent = reminder.due ? 'Cada día 1 · Pendiente este mes' : `Este mes registrado · Próximo: ${fmtDate(reminder.next, { day: 'numeric', month: 'long' })}`;
 }
 
-function openProfile(focusDate = false) {
+async function openProfile(focusDate = false) {
+  const token = sheetToken;
+  try {
+    await loadRoutine();
+  } catch (error) {
+    console.error('No se pudo leer el perfil.', error);
+    toast('No se pudo leer el perfil. Tus datos se conservan; vuelve a intentar.');
+    return;
+  }
+  if (token !== sheetToken) return;
   const profile = state.profile;
-  openSheet(`<h2>Editar perfil</h2><form id="profile-form">
+  const routineId = state.routineRevisions.has(state.activeRoutineId) ? state.activeRoutineId : null;
+  const expectedRoutine = state.routineRevisions.get(routineId) || null;
+  const expectedProfile = structuredClone(state.personalProfile);
+  openSheet(`<h2>Editar perfil</h2>${!routineId ? '<p class="training-caption">Sin rutina activa, el perfil se guarda aquí y en tu respaldo. No crearemos un plan ni cambiaremos tus rutinas.</p>' : ''}<form id="profile-form">
     <div class="field-grid profile-fields">
       <div class="field profile-wide"><label for="profile-name">Nombre</label><input id="profile-name" autocomplete="name" maxlength="80" required value="${esc(profile.name)}"></div>
       <div class="field"><label for="profile-sport">Deporte</label><input id="profile-sport" maxlength="60" value="${esc(profile.sport)}"></div>
@@ -2351,7 +3395,6 @@ function openProfile(focusDate = false) {
   </form>`);
   $('#profile-cancel').onclick = closeSheet;
   const form = $('#profile-form');
-  const saveButton = $('#profile-save');
   const errorLabel = $('#profile-error');
   let saving = false;
   form.onsubmit = async event => {
@@ -2362,36 +3405,155 @@ function openProfile(focusDate = false) {
       errorLabel.textContent = 'Revisa el nombre, los días (1 a 7) y la fecha.';
       return;
     }
-    saving = true;
-    saveButton.disabled = true;
+    saving = sheetBusy = true;
+    const restoreControls = freezeControls([...form.querySelectorAll('button, input'), $('#sheet .sheet-dismiss')]);
+    let committed = false;
     try {
-      const saved = (await db.allRoutines()).find(routine => routine.id === ROUTINE_ID);
-      const updated = normalizeProfile(values);
-      await db.putRoutine({ ...(saved || { id: ROUTINE_ID, name: 'Mi rutina', days: state.routine, active: true }), profile: updated });
-      state.profile = updated;
-      state.routineUpdatedAt = Date.now();
+      await db.savePersonalProfile(values, { routineId, expectedRoutine, expectedProfile });
+      committed = true;
+      await loadRoutine();
+      sheetBusy = false;
       if ($('#profile-form') === form) closeSheet();
       renderHome(); renderBody(); renderSettings();
       toast('Perfil guardado');
       sync.syncQuietly();
     } catch (error) {
-      errorLabel.textContent = error.message || 'No se pudo guardar el perfil';
+      console.error('No se pudo guardar el perfil personal.', error);
+      errorLabel.textContent = committed ? 'El perfil se guardó, pero no se pudo actualizar la pantalla. Vuelve a abrir la app.' : error.message || 'No se pudo guardar el perfil';
     } finally {
-      saving = false;
-      saveButton.disabled = false;
+      saving = sheetBusy = false;
+      restoreControls();
     }
   };
   if (focusDate) $('#profile-date').focus();
 }
 
+async function loadTrainingPreferences() {
+  const preferences = trainingPreferences(await db.getMeta('trainingPreferences'));
+  state.restSeconds = preferences.restSeconds;
+  state.keepScreenAwake = preferences.keepScreenAwake;
+  screenWakeLock.update();
+}
+
+function wakeLockDescription() {
+  if (!navigator.wakeLock) return 'Este navegador no permite mantener la pantalla activa.';
+  if (state.wakeLockStatus === 'active') return 'Pantalla activa mientras entrenas en esta vista.';
+  if (state.wakeLockStatus === 'requesting') return 'Solicitando permiso al navegador…';
+  if (state.wakeLockStatus === 'unavailable') return 'El navegador no lo permitió ahora. El entrenamiento sigue guardado.';
+  return 'Opcional durante el entrenamiento. El sistema puede liberarla; no funciona con la app en segundo plano.';
+}
+
+function openTrainingPreferences() {
+  openSheet(`<span class="eyebrow">A tu manera</span><h2>Descanso y pantalla</h2><form id="training-preferences-form" novalidate>
+    <p class="training-caption">El descanso del coach tiene prioridad. Esta preferencia se usa cuando el bloque no indica uno y no cambia un temporizador en curso.</p>
+    <div class="seg" role="group" aria-label="Descansos habituales">${[30, 45, 60].map(value => `<button type="button" data-preferred-rest="${value}" aria-pressed="${state.restSeconds === value}" class="${state.restSeconds === value ? 'on' : ''}">${value} s</button>`).join('')}</div>
+    <div class="field"><label for="preferred-rest">Personalizado · segundos (1–3600)</label><input id="preferred-rest" type="number" inputmode="numeric" min="1" max="3600" step="1" required value="${state.restSeconds}"></div>
+    <label class="preference-check"><input id="keep-screen-awake" type="checkbox" ${state.keepScreenAwake ? 'checked' : ''} ${navigator.wakeLock ? '' : 'disabled'}><span>Mantener la pantalla despierta</span></label>
+    <p id="wake-support" class="training-caption">${esc(wakeLockDescription())}</p><p class="training-caption">Se guarda aquí y en tu respaldo. Las preferencias todavía no se sincronizan con Supabase.</p>
+    <p id="preferences-error" class="correction-error" role="alert"></p><div class="sheet-form-actions"><button class="btn btn-primary" type="submit">Guardar preferencias</button><button class="btn btn-ghost" id="preferences-cancel" type="button">Cancelar</button></div></form>`);
+  const form = $('#training-preferences-form');
+  const input = $('#preferred-rest');
+  const updateSelection = () => $$('[data-preferred-rest]').forEach(button => {
+    const selected = Number(input.value) === Number(button.dataset.preferredRest);
+    button.classList.toggle('on', selected); button.setAttribute('aria-pressed', String(selected));
+  });
+  $$('[data-preferred-rest]').forEach(button => { button.onclick = () => { input.value = button.dataset.preferredRest; updateSelection(); }; });
+  input.oninput = updateSelection;
+  $('#preferences-cancel').onclick = () => closeSheet();
+  let saving = false;
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (saving) return;
+    const errorLabel = $('#preferences-error');
+    const controls = [...form.querySelectorAll('button, input, select'), $('#sheet .sheet-dismiss')];
+    let restoreControls;
+    try {
+      const preferences = trainingPreferences({ restSeconds: Number(input.value), keepScreenAwake: $('#keep-screen-awake').checked });
+      saving = sheetBusy = true;
+      restoreControls = freezeControls(controls);
+      await db.setMeta('trainingPreferences', preferences);
+      state.restSeconds = preferences.restSeconds;
+      state.keepScreenAwake = preferences.keepScreenAwake;
+      screenWakeLock.update();
+      sheetBusy = false;
+      closeSheet();
+      $('#training-preferences-summary').textContent = `${state.restSeconds} s por defecto${state.keepScreenAwake ? ' · Pantalla activa solicitada' : ''}`;
+      toast('Preferencias guardadas · El temporizador en curso no cambió.');
+    } catch (error) {
+      console.error('No se pudieron guardar las preferencias.', error);
+      errorLabel.textContent = error.message || 'No se pudo guardar. Vuelve a intentar.';
+    } finally {
+      saving = sheetBusy = false;
+      restoreControls?.();
+    }
+  };
+}
+
+function openPersonalSetup() {
+  const hasData = state.sessions.length || state.measures.length || state.exercises.length || state.routines.length || state.profile.name;
+  openSheet(`<span class="eyebrow">Perfil y preferencias</span><h2>Configurar entrenamiento</h2><p>${hasData ? 'Tus rutinas e historial se conservan. Cambia únicamente lo que necesites.' : 'Empieza importando el plan de tu gym. El perfil y los descansos se pueden ajustar cuando quieras.'}</p>
+    <div class="list-card"><button class="list-row" id="setup-profile"><span class="lr-body"><strong>Tu perfil</strong><small>${esc(state.profile.name || 'Opcional: nombre y objetivo semanal')}</small></span><span aria-hidden="true">›</span></button>
+    <button class="list-row" id="setup-preferences"><span class="lr-body"><strong>Descanso y pantalla</strong><small>${state.restSeconds} s por defecto</small></span><span aria-hidden="true">›</span></button>
+    <button class="list-row" id="setup-routines"><span class="lr-body"><strong>Mis rutinas</strong><small>${plural(state.routines.length, 'plan guardado', 'planes guardados')} · importar PDF o texto</small></span><span aria-hidden="true">›</span></button>
+    <button class="list-row" id="setup-generate"><span class="lr-body"><strong>Crear rutina con mis ejercicios</strong><small>Usa los ejercicios de tus planes guardados</small></span><span aria-hidden="true">›</span></button>
+    <button class="list-row" id="setup-restore"><span class="lr-body"><strong>Recuperar un respaldo</strong><small>Revisar antes de fusionar. No se vacía el dispositivo.</small></span><span aria-hidden="true">›</span></button></div>
+    <button class="btn btn-primary" id="setup-done">Listo</button>`);
+  $('#setup-profile').onclick = () => openProfile();
+  $('#setup-preferences').onclick = openTrainingPreferences;
+  $('#setup-routines').onclick = openRoutineCatalog;
+  $('#setup-generate').onclick = () => openRoutineGenerator();
+  $('#setup-restore').onclick = () => $('#file-input').click();
+  $('#setup-done').onclick = () => closeSheet();
+}
+
+function openRoutineGenerator(previous = {}) {
+  const choices = (values, selected) => values.map(([value, label]) => `<option value="${value}" ${value === selected ? 'selected' : ''}>${label}</option>`).join('');
+  const savedRoutines = state.routines.filter(record => state.routineRevisions.has(record.id));
+  const savedNames = new Set(savedRoutines.flatMap(record => record.days.flatMap(day => day.blocks.flatMap(block => block.movements.map(movement => exerciseNameKey(movement.name))))));
+  openSheet(`<span class="eyebrow">Tu biblioteca de ejercicios</span><h2>Crear una rutina personalizada</h2><p class="training-caption">Por defecto usamos los ejercicios que ya aparecen en tus rutinas guardadas, incluidas las del gym. Obtendrás un borrador para revisar con tu coach; el plan actual no se reemplaza.</p><form id="generator-form">
+    <div class="field"><label for="generator-source">Ejercicios de</label><select id="generator-source" required>${choices([['routines', 'Mis rutinas guardadas'], ['personal', 'Mis rutinas y fichas personales'], ['catalog', 'Catálogo de ejemplo'], ['both', 'Guardados y catálogo']], previous.source || 'routines')}</select></div>
+    <p class="training-caption" id="generator-source-summary">Planes disponibles aquí: ${plural(savedRoutines.length, 'rutina guardada', 'rutinas guardadas')} · ${plural(savedNames.size, 'nombre de ejercicio', 'nombres de ejercicio')}. La propuesta depende del enfoque y de las indicaciones compatibles.</p>
+    <div class="field-grid"><div class="field"><label for="generator-days">Días por semana</label><input id="generator-days" type="number" min="1" max="7" required value="${previous.days || state.profile.daysPerWeek}"></div><div class="field"><label for="generator-minutes">Minutos disponibles</label><input id="generator-minutes" type="number" min="15" max="120" step="1" required value="${previous.minutes || 45}"></div>
+    <div class="field"><label for="generator-goal">Objetivo</label><select id="generator-goal">${choices([['consistency', 'Constancia'], ['strength', 'Fuerza general'], ['muscle', 'Desarrollo muscular']], previous.goal || 'consistency')}</select></div>
+    <div class="field"><label for="generator-experience">Experiencia</label><select id="generator-experience">${choices([['returning', 'Empezando o retomando'], ['regular', 'Entreno habitualmente']], previous.experience || 'returning')}</select></div>
+    <div class="field"><label for="generator-focus">Enfoque</label><select id="generator-focus">${choices([['full', 'Cuerpo completo'], ['upper', 'Tren superior'], ['lower', 'Tren inferior']], previous.focus || 'full')}</select></div>
+    <div class="field"><label for="generator-rest">Descanso por defecto (s)</label><input id="generator-rest" type="number" min="1" max="3600" required value="${previous.restSeconds || state.restSeconds}"></div></div>
+    <div class="field"><label for="generator-equipment">Equipo · opcional</label><select id="generator-equipment"><option value="">Sin filtro: verificar disponibilidad</option>${exerciseEquipmentValues().map(value => `<option value="${esc(value)}" ${value === previous.equipment ? 'selected' : ''}>${esc(value)}</option>`).join('')}</select></div>
+    <p class="training-caption">En fuentes personales se conservan las series, reps y descansos indicados. Si no hay opciones suficientes, avisamos; no completamos con otra fuente.</p>
+    <p id="generator-error" class="correction-error" role="alert"></p><div class="sheet-form-actions"><button class="btn btn-primary" type="submit">Ver propuesta</button><button class="btn btn-ghost" type="button" id="generator-cancel">Cancelar</button></div></form>`);
+  $('#generator-cancel').onclick = () => closeSheet();
+  $('#generator-form').onsubmit = event => {
+    event.preventDefault();
+    const options = {
+      source: $('#generator-source').value, days: Number($('#generator-days').value),
+      minutes: Number($('#generator-minutes').value), goal: $('#generator-goal').value,
+      experience: $('#generator-experience').value, focus: $('#generator-focus').value,
+      restSeconds: Number($('#generator-rest').value), equipment: $('#generator-equipment').value, idPrefix: `generated-${uid()}`
+    };
+    try {
+      const proposal = generateRoutine(options, { catalog: EXERCISE_CATALOG,
+        routines: state.routines.filter(record => state.routineRevisions.has(record.id)), exercises: state.exercises });
+      openSheet(`<span class="eyebrow">Borrador sin guardar</span><h2>Vista previa de la rutina</h2><p class="training-caption">Revisa y ajusta el resultado antes de guardarlo. Tu rutina actual y sus registros se conservan.</p><div class="generator-preview">${proposal.days.map(day => `<section><h3>${esc(day.label)} <small>~${day.estimatedMinutes} min</small></h3>${day.blocks.map(block => `<p><strong>${esc(block.movements[0].name)}</strong><small>${block.sets} series · ${esc(block.movements[0].reps)} · descanso ${block.rest} s</small></p>`).join('')}</section>`).join('')}</div>${proposal.warnings.map(warning => `<p class="training-caption">${esc(warning)}</p>`).join('')}<div class="sheet-form-actions"><button class="btn btn-primary" id="generator-edit">Revisar y editar</button><button class="btn btn-ghost" id="generator-back">Cambiar opciones</button></div>`);
+      $('#generator-back').onclick = () => openRoutineGenerator(options);
+      $('#generator-edit').onclick = () => openEditor(proposal.days, proposal.warnings, {
+        name: 'Rutina personalizada', activate: false, source: 'generated', generation: proposal.provenance
+      });
+    } catch (error) {
+      console.error('No se pudo preparar la propuesta.', error);
+      $('#generator-error').textContent = error.message;
+    }
+  };
+}
+
 async function renderSettings() {
   const profile = state.profile;
-  $('#settings-profile').innerHTML = `<span class="settings-monogram" aria-hidden="true">${esc(profile.name.split(/\s+/).map(part => part[0]).slice(0, 2).join(''))}</span><span class="settings-profile-copy"><strong>${esc(profile.name)}</strong><small>${esc([profile.sport, profile.coach ? `Coach ${profile.coach}` : ''].filter(Boolean).join(' · '))}</small></span><strong>${profile.daysPerWeek}<small>días/sem.</small></strong><svg class="profile-edit-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg>`;
+  $('#settings-profile').innerHTML = `<span class="settings-monogram" aria-hidden="true">${esc(profile.name.split(/\s+/).map(part => part[0]).slice(0, 2).join('') || 'R')}</span><span class="settings-profile-copy"><strong>${esc(profile.name || 'Tu perfil')}</strong><small>${esc([profile.sport, profile.coach ? `Coach ${profile.coach}` : ''].filter(Boolean).join(' · '))}</small></span><strong>${profile.daysPerWeek}<small>días/sem.</small></strong><svg class="profile-edit-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg>`;
   renderInBodyReminder();
   const notice = $('#storage-notice');
   $('#multimedia-audio').checked = state.multimediaAudio;
   $('#multimedia-audio').disabled = !navigator.audioSession;
   $('#audio-support').textContent = navigator.audioSession ? 'Experimental · Puede interrumpir tu música. No garantiza alarmas en segundo plano.' : 'Este navegador no ofrece Audio Session. Se mantiene el audio normal.';
+  $('#training-preferences-summary').textContent = `${state.restSeconds} s por defecto${state.keepScreenAwake ? ' · Pantalla activa solicitada' : ''}`;
   const standalone = isStandalone();
   const { persisted } = await requestPersistence();
 
@@ -2423,7 +3585,10 @@ async function renderSettings() {
   $('#routine-change').textContent = profile.routineChangeDate ? fmtDate(new Date(profile.routineChangeDate + 'T12:00:00'), { day: 'numeric', month: 'long', year: 'numeric' }) : 'Sin fecha programada';
 
   const mv = state.routine.reduce((a, d) => a + d.blocks.reduce((b, bl) => b + bl.movements.length, 0), 0);
-  $('#routine-summary').textContent = `${state.routine.length} días · ${mv} ejercicios${state.routineUpdatedAt ? ` · Guardada ${fmtDate(state.routineUpdatedAt, { day: 'numeric', month: 'short' })}` : ' · Rutina inicial'}`;
+  const activeName = activeRoutineRecord()?.name;
+  $('#routine-summary').textContent = state.routine.length ? `${activeName ? `${activeName} · ` : ''}${state.routine.length} días · ${mv} ejercicios` : 'Sin rutina activa';
+  const personalCount = personalExerciseViews().length;
+  $('#exercise-summary').textContent = `${personalCount} ${personalCount === 1 ? 'ejercicio guardado aquí' : 'ejercicios guardados aquí'} · ${EXERCISE_CATALOG.length} de catálogo`;
 
   applyTheme(state.theme);
   await renderSync();
@@ -2431,34 +3596,41 @@ async function renderSettings() {
 
 /* ============================== Arranque ============================== */
 
-async function loadAll() {
+async function loadAll({ preserveSession = false } = {}) {
+  const liveSession = preserveSession ? state.session : null;
   // Los registros con `deletedAt` son lápidas para sincronizar: no se muestran.
   state.sessions = ((await db.allSessions()) || []).filter(s => !s.deletedAt);
   state.measures = ((await db.allMeasures()) || []).filter(m => !m.deletedAt).sort((a, b) => a.at - b.at);
+  state.exercises = ((await db.allExercises()) || []).filter(exercise => !exercise.deletedAt).map(exercise => ({
+    ...exercise,
+    sources: Array.isArray(exercise.sources) && exercise.sources.length ? exercise.sources : [exercise.source].filter(Boolean),
+    nameKey: exercise.nameKey || exerciseNameKey(exercise.name)
+  }));
   state.session = state.sessions.find(s => !s.finishedAt) || null;
-}
-
-/** Carga las mediciones InBody que ya existían antes de la app (solo la primera vez). */
-async function seedMeasures() {
-  if (await db.getMeta('measuresSeeded')) return;
-  try {
-    const res = await fetch('data/seed-measures.json');
-    if (!res.ok) return;
-    const data = await res.json();
-    for (const m of data.measures || []) {
-      await db.putMeasure({ id: m.id, at: new Date(m.at).getTime(), values: m.values });
-    }
-    await db.setMeta('measuresSeeded', true);
-    state.measures = ((await db.allMeasures()) || []).sort((a, b) => a.at - b.at);
-  } catch {
-    // Sin red y sin caché: se puede capturar a mano más tarde.
+  if (liveSession && state.session?.id === liveSession.id) {
+    liveSession.routineSnapshot ||= state.session.routineSnapshot;
+    state.session = liveSession;
+    state.sessions = state.sessions.map(session => session.id === liveSession.id ? liveSession : session);
   }
 }
 
 function bindGlobal() {
+  const updateNavigationInset = () => {
+    const height = $('#tabbar').getBoundingClientRect().height;
+    if (height > 0) document.documentElement.style.setProperty('--nav-height', `${Math.ceil(height)}px`);
+  };
+  if (typeof ResizeObserver === 'function') new ResizeObserver(updateNavigationInset).observe($('#tabbar'));
+  window.addEventListener('resize', updateNavigationInset);
+  updateNavigationInset();
   $$('.open-training-progress').forEach(button => { button.onclick = () => trainingUI.openProgress('week', Date.now()); });
   $('#btn-achievements').onclick = openAchievements;
   $('#btn-functions').onclick = openFunctions;
+  $('#btn-training-preferences').onclick = openTrainingPreferences;
+  $('#btn-personal-setup').onclick = openPersonalSetup;
+  $('#retry-session-save').onclick = () => saveSession(true)?.catch(warnSessionSave);
+  sync.onSyncChange(updateSaveStatus);
+  window.addEventListener('online', updateSaveStatus);
+  window.addEventListener('offline', updateSaveStatus);
   $('#settings-profile').onclick = () => openProfile();
   $('#btn-routine-date').onclick = () => openProfile(true);
   $('#btn-settings-inbody').onclick = openNewMeasure;
@@ -2511,11 +3683,10 @@ function bindGlobal() {
 
   $('#btn-back').onclick = () => { setView('home'); renderHome(); };
 
-  $('#btn-timer').onclick = () => startRest(state.restSeconds);
-  $('#btn-notes').onclick = openNotes;
+  $('#btn-workout-menu').onclick = openWorkoutMenu;
   $('#rt-close').onclick = hideRest;
   $('#rt-toggle').onclick = toggleCountdown;
-  $$('.rt-chip[data-rest]').forEach(b => { b.onclick = () => { state.restSeconds = +b.dataset.rest; startRest(state.restSeconds); }; });
+  $$('.rt-chip[data-rest]').forEach(b => { b.onclick = () => startRest(+b.dataset.rest); });
   $('#btn-finish').onclick = async () => {
     const p = sessionProgress(state.session);
     if (p.done === 0) return toast('Aún no registras ninguna serie');
@@ -2531,35 +3702,40 @@ function bindGlobal() {
   };
 
   $('#btn-discard').onclick = async () => {
+    if (!state.session || discardingSessionId) return;
+    const session = state.session;
     const ok = await confirmSheet({
       title: 'Descartar sesión',
       body: 'Se borrará todo lo que registraste en esta sesión. No se puede deshacer.',
       confirm: 'Descartar', cancel: 'Cancelar', danger: true
     });
-    if (!ok) return;
-    await db.deleteSession(state.session.id);
-    state.sessions = state.sessions.filter(s => s.id !== state.session.id);
-    state.session = null;
-    setView('home'); renderHome();
-    toast('Sesión descartada');
+    if (!ok || state.session?.id !== session.id || discardingSessionId) return;
+    const pendingWeight = state.sessionSaveStatus === 'saving';
+    discardingSessionId = session.id;
+    const restoreControls = freezeControls($$('#view-workout button, #view-workout input, #view-workout textarea'));
+    try {
+      clearTimeout(saveTimer);
+      await saveQueue;
+      await db.deleteSession(session.id);
+      state.sessions = state.sessions.filter(item => item.id !== session.id);
+      state.session = null;
+      setView('home'); renderHome();
+      toast('Sesión descartada');
+    } catch (error) {
+      console.error('No se pudo descartar la sesión.', error);
+      toast('No se pudo descartar. Tu sesión sigue abierta; vuelve a intentarlo.');
+    } finally {
+      discardingSessionId = null;
+      restoreControls();
+      if (pendingWeight && state.session?.id === session.id) saveSession();
+    }
   };
 
   $('#btn-export').onclick = exportBackup;
   $('#btn-import').onclick = () => $('#file-input').click();
 
-  $('#btn-edit-routine').onclick = () => openEditor(state.routine, []);
-  $('#btn-import-routine').onclick = openImportRoutine;
-  $('#btn-reset-routine').onclick = async () => {
-    const ok = await confirmSheet({
-      title: 'Restaurar rutina original',
-      body: 'Vuelve la rutina del PDF de Anderson. Tu historial de entrenamientos no se borra.',
-      confirm: 'Restaurar', cancel: 'Cancelar'
-    });
-    if (!ok) return;
-    await saveRoutine(DEFAULT_ROUTINE, 'Rutina Anderson');
-    renderHome(); renderSettings();
-    toast('Rutina restaurada');
-  };
+  $('#btn-edit-routine').onclick = openRoutineCatalog;
+  $('#btn-exercise-library').onclick = openExerciseLibrary;
 
   $('#ed-cancel').onclick = async () => {
     if (state.edDirty) {
@@ -2570,24 +3746,41 @@ function bindGlobal() {
       if (!ok) return;
     }
     state.draft = null;
+    state.draftRoutineId = null;
+    state.draftBaseline = state.draftGeneration = null;
+    state.draftRoutineName = '';
     setView('settings'); renderSettings();
   };
 
+  let savingRoutine = false;
   $('#ed-save').onclick = async () => {
+    if (savingRoutine) return;
     if (!edValidate()) return;
+    const controls = $$('#view-editor button, #view-editor input, #view-editor select, #view-editor textarea');
+    savingRoutine = true;
+    const restoreControls = freezeControls(controls);
     try {
-      const endedCycle = await saveRoutine(state.draft, 'Mi rutina', $('#ed-new-cycle').checked);
+      state.draftRoutineName = $('#ed-routine-name').value.trim() || 'Nueva rutina';
+      state.draftActivate = $('#ed-activate-routine').checked;
+      const endedCycle = await saveRoutine(state.draft, state.draftRoutineName, $('#ed-new-cycle').checked);
       state.draft = null;
+      state.draftRoutineId = null;
+      state.draftBaseline = state.draftGeneration = null;
       state.edDirty = false;
-      setView('home'); renderHome();
+      setView('home'); renderHome(); renderSettings();
       sync.syncQuietly();
       toast('Rutina guardada');
       if (endedCycle) trainingUI.openProgress('cycle', Date.now(), endedCycle);
     } catch (e) {
       toast(e.message);
+    } finally {
+      savingRoutine = false;
+      restoreControls();
     }
   };
   bindEditor();
+  $('#ed-routine-name').oninput = () => { state.draftRoutineName = $('#ed-routine-name').value; edTouch(); };
+  $('#ed-activate-routine').onchange = () => { state.draftActivate = $('#ed-activate-routine').checked; edTouch(); };
   $('#file-input').onchange = (e) => {
     const f = e.target.files?.[0];
     e.target.value = '';
@@ -2601,6 +3794,8 @@ function bindGlobal() {
       confirm: 'Sí, borrar todo', cancel: 'Cancelar', danger: true
     });
     if (!ok) return;
+    clearTimeout(saveTimer);
+    await saveQueue;
     await db.clearSessions();
     await db.clearMeasures();
     state.sessions = []; state.session = null; state.measures = [];
@@ -2631,10 +3826,10 @@ function bindGlobal() {
 
   // Guardado defensivo al salir de la app (iOS puede matarla en segundo plano)
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') saveSession(true);
+    if (document.visibilityState === 'hidden') saveSession(true)?.catch(warnSessionSave);
     else { tickCountdown(); renderInBodyReminder(); renderRoutineAlert(); }
   });
-  window.addEventListener('pagehide', () => saveSession(true));
+  window.addEventListener('pagehide', () => saveSession(true)?.catch(warnSessionSave));
 
   let reminderDate = dateKey(Date.now());
   setInterval(() => {
@@ -2646,26 +3841,61 @@ function bindGlobal() {
   }, 30000);
 }
 
+function finishLaunch(failed = false) {
+  if (document.documentElement.dataset.bootAssetError === 'true') return;
+  document.documentElement.dataset.boot = failed ? 'failed' : 'ready';
+  $('#app').inert = false;
+  $('#app').hidden = false;
+  $('#app').removeAttribute('aria-busy');
+  $('#tabbar').inert = failed;
+  $('#tabbar').hidden = failed;
+  const launch = $('#launch-screen');
+  if (launch) {
+    launch.inert = true;
+    launch.setAttribute('aria-hidden', 'true');
+    Promise.allSettled((launch.getAnimations?.() || []).map(animation => animation.finished)).then(() => { launch.hidden = true; });
+  }
+  document.dispatchEvent(new Event('reawaken-boot-complete'));
+}
+
 async function init() {
-  await loadAll();
-  await loadRoutine();
-  state.multimediaAudio = (await db.getMeta('multimediaAudio')) === true;
-  applyTheme((await db.getMeta('theme')) || 'auto');
-  await seedMeasures();
-  bindGlobal();
-  renderHome();
-  requestPersistence();
-  checkBackupReminder();
+  if (document.documentElement.dataset.bootAssetError === 'true') return;
+  try {
+    await loadAll();
+    await loadRoutine();
+    await loadTrainingPreferences();
+    state.multimediaAudio = (await db.getMeta('multimediaAudio')) === true;
+    applyTheme((await db.getMeta('theme')) || 'auto');
+    confirmedTheme = state.theme;
+    renderHome();
+    bindGlobal();
+    finishLaunch();
+  } catch (error) {
+    console.error('No se pudo iniciar la vista con los datos locales.', error);
+    $('#app').innerHTML = '<section class="page startup-error"><div class="notice warn" role="alert"><h1>No pudimos abrir tus datos</h1><p>No se borró el almacenamiento. No iniciaremos una configuración nueva sobre tus registros.</p></div><button class="btn btn-primary" id="startup-retry">Reintentar</button></section>';
+    $('#tabbar').inert = true;
+    $('#startup-retry').onclick = () => window.location.reload();
+    finishLaunch(true);
+    return;
+  }
+  requestPersistence().catch(error => console.warn('No se pudo solicitar almacenamiento persistente.', error));
+  checkBackupReminder().catch(error => console.warn('No se pudo comprobar el recordatorio de respaldo.', error));
 
   sync.loadConfig().then(() => sync.syncQuietly().then(async r => {
     if (!r || (!r.pulled && !r.pushed) || state.session || state.draft) return;
     await loadAll();
     await loadRoutine();
     renderHome();
-  }));
+  })).catch(error => {
+    console.warn('No se pudo preparar la sincronización.', error);
+    toast('No se pudo preparar la nube. Tus registros locales se conservan; revisa Ajustes.');
+  });
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(error => {
+      console.warn('No se pudieron preparar los archivos sin conexión.', error);
+      $('#update-status').textContent = 'No se pudo preparar la actualización offline. Conecta y vuelve a intentarlo.';
+    });
   }
 }
 
@@ -2677,6 +3907,8 @@ async function checkForUpdate() {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
   try {
+    if (state.session) throw new Error('Termina el entrenamiento antes de actualizar. No interrumpiremos tu sesión.');
+    if (state.draft || state.edDirty) throw new Error('Guarda o cancela el editor antes de actualizar.');
     if (!navigator.onLine) throw new Error('Sin conexión. Tus datos siguen guardados aquí.');
     const response = await fetch(`index.html?update=${Date.now()}`, { cache: 'no-store', signal: controller.signal });
     if (!response.ok) throw new Error('No se pudo consultar la actualización');
@@ -2689,7 +3921,30 @@ async function checkForUpdate() {
       body: 'Se recargarán los archivos de la app. Tu rutina, tus registros y tu sesión de cuenta se conservan.',
       confirm: 'Recargar', cancel: 'Ahora no'
     });
-    if (accepted) { await saveSession(true); window.location.reload(); }
+    if (accepted) {
+      const worker = registration?.installing || registration?.waiting || registration?.active;
+      if (worker && worker.state !== 'activated') {
+        label.textContent = 'Preparando los archivos para usar sin conexión…';
+        await new Promise((resolve, reject) => {
+          const finish = () => {
+            if (worker.state === 'activated' || worker.state === 'redundant') {
+              clearTimeout(timer);
+              worker.removeEventListener('statechange', finish);
+              if (worker.state === 'activated') resolve();
+              else reject(new Error('La actualización no se pudo preparar. Tus datos siguen aquí.'));
+            }
+          };
+          const timer = setTimeout(() => {
+            worker.removeEventListener('statechange', finish);
+            reject(new Error('La actualización está tardando. Intenta de nuevo cuando tengas conexión.'));
+          }, 30000);
+          worker.addEventListener('statechange', finish);
+          finish();
+        });
+      }
+      if (state.session || state.draft || state.edDirty) throw new Error('Hay cambios en curso. No se recargó la app.');
+      window.location.reload();
+    }
   } catch (error) {
     label.textContent = error.name === 'AbortError' ? 'La conexión tardó demasiado. Vuelve a intentar.' : error.message;
   } finally {

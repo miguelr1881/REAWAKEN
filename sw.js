@@ -1,7 +1,8 @@
-const CACHE = 'reawaken-v28';
+const CACHE = 'reawaken-v49';
 const ASSETS = [
   './',
   './index.html',
+  './favicon.svg',
   './css/styles.css',
   './fonts/BarlowSemiCondensed-Bold.ttf',
   './js/app.js',
@@ -9,9 +10,15 @@ const ASSETS = [
   './js/profile.js',
   './js/progress.js',
   './js/intelligence.js',
+  './js/session-history.js',
+  './js/personal-records.js',
+  './js/training-preferences.js',
+  './js/routine-generator.js',
   './js/training-ui.js',
   './js/exercise-info.js',
+  './js/exercise-catalog.js',
   './js/db.js',
+  './js/backup.js',
   './js/routine.js',
   './js/routine-parser.js',
   './js/routine-pdf.js',
@@ -29,6 +36,10 @@ const ASSETS = [
   './icons/clipboard-check.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',
+  './icons/launch-portrait-dark.png',
+  './icons/launch-portrait-light.png',
+  './icons/launch-landscape-dark.png',
+  './icons/launch-landscape-light.png',
   './icons/icon-maskable-512.png'
 ];
 
@@ -41,16 +52,21 @@ self.addEventListener('install', (e) => {
 });
 
 self.addEventListener('activate', (e) => {
-  e.waitUntil(
-    caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k.startsWith('reawaken-') && k !== CACHE).map(k => caches.delete(k))))
-      .then(() => self.clients.claim())
-  );
+  e.waitUntil(pruneRetiredCaches().then(() => self.clients.claim()));
 });
+
+async function pruneRetiredCaches() {
+  const version = Number(CACHE.match(/-v(\d+)$/)[1]);
+  const keys = await caches.keys();
+  await Promise.all(keys.filter(key => {
+    const match = key.match(/^reawaken-v(\d+)$/);
+    return match && Number(match[1]) < version;
+  }).map(key => caches.delete(key)));
+}
 
 // Network-first con fallback a caché: siempre usable sin señal en el gym.
 self.addEventListener('fetch', (e) => {
-  if (e.request.method !== 'GET') return;
+  if (e.request.method !== 'GET' || e.request.cache === 'no-store') return;
   const url = new URL(e.request.url);
   if (url.origin !== self.location.origin) return;
   const navigation = e.request.mode === 'navigate';
@@ -58,14 +74,14 @@ self.addEventListener('fetch', (e) => {
   url.search = '';
   const key = navigation ? new URL('./index.html', self.location.href).href : url.href;
   e.respondWith((async () => {
-    const cache = await caches.open(CACHE);
-    const cached = await cache.match(key);
+    await pruneRetiredCaches().catch(error => console.warn('No se pudieron retirar las cachés antiguas.', error));
+    // Solo install crea la cache: un fetch tardío no puede resucitar una versión retirada.
+    const cached = await caches.match(key, { cacheName: CACHE });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), cached ? 4000 : 15000);
     try {
       const response = await fetch(e.request, { cache: 'no-cache', signal: controller.signal });
-      if (response.ok) await cache.put(key, response.clone()).catch(() => {});
-      return response;
+      return response.ok ? response : cached || response;
     } catch {
       return cached || Response.error();
     } finally {
