@@ -8,7 +8,7 @@
 
 Una app de entrenamiento personal que funciona sin conexión, conserva tu historial y convierte tus registros en una colección de progreso.
 
-![Versión](https://img.shields.io/badge/versión-2.9.2-5B3DF5?style=flat-square)
+![Versión](https://img.shields.io/badge/versión-2.9.3-5B3DF5?style=flat-square)
 ![PWA](https://img.shields.io/badge/PWA-offline--first-087982?style=flat-square)
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES_modules-F7DF1E?style=flat-square&logo=javascript&logoColor=14141a)
 ![Nube opcional](https://img.shields.io/badge/Supabase-opcional-167D36?style=flat-square)
@@ -25,7 +25,7 @@ REAWAKEN es una **PWA de registro de entrenamiento**, diseñada para consultarse
 
 Desde el 14 de octubre de 2026, el alcance es **uso exclusivo de Miguel**: sin marketplace, comunidad, rankings ni reseñas para terceros. La petición del 15 de octubre prioriza estética y mejoras de uso diario, sin exigir identificar kg o lb ni cambiar datos reales.
 
-La versión de esta carpeta es **2.9.2**; el sitio oficial comprobado el 14 de octubre todavía servía **2.8.9**. Una corrección local no implica que ya esté publicada.
+La versión de esta carpeta es **2.9.3**. La actualización del sitio oficial queda disponible cuando finaliza el despliegue de GitHub Pages; comprueba la versión instalada en Ajustes. Las pruebas automatizadas no sustituyen la revisión de los datos reales ni de Safari/PWA en el iPhone.
 
 La idea es sencilla: **registrar lo que hiciste sin convertir cada serie en un formulario**. Las repeticiones del plan ya están visibles, el peso anterior sirve de referencia y puedes corregir lo necesario directamente en el ejercicio.
 
@@ -71,7 +71,7 @@ Capturas de la interfaz generadas a **1760 × 1280 píxeles**. Abre cada imagen 
 | **Actividad anual** | Ver sesiones por mes, cambiar de año y abrir sus fechas sin reiniciar el historial. |
 | **Descanso y pantalla** | Guardar un descanso por defecto y solicitar pantalla despierta durante el entrenamiento. |
 | **Tu balance** | Revisar trabajo registrado por día, semana, mes o ciclo. |
-| **Sugerencias de carga** | Recibir orientaciones para subir, mantener o bajar sin proponer pesos concretos. |
+| **Sugerencias de carga** | Mostrar solo subidas respaldadas; mantener no añade mensajes ni se proponen pesos concretos. |
 | **PR por serie** | Marcar una carga superior a registros previos comparables por ejercicio, reps, equipo y unidad. |
 | **Muscle Battery** | Consultar una estimación de carga reciente por grupo muscular. |
 | **Lo que noté** | Ver cambios sostenidos en registros comparables y abrir las sesiones que los sustentan. |
@@ -112,6 +112,16 @@ Cuando falta una referencia comparable o el plan es especial, aparece una explic
 **Tu progreso por ejercicio** reúne un buscador, sesiones y una curva de cargas. Cada punto es el máximo de una sesión para las mismas reps, plan y contexto declarado; equipos, variantes, notas o unidades diferentes quedan separados. Permite seguir la escala habitual sin convertir kg/lb. No calcula un 1RM, percentil ni nivel de fuerza, ni inventa metadatos de registros antiguos. Corregir un peso actualiza la curva y las referencias de PR sin celebrar de nuevo el entrenamiento pasado.
 
 La entrega también revisa jerarquía de Inicio, tarjetas, controles de entrenamiento, calendario y hojas en claro/oscuro. El entrenamiento conserva el protagonismo frente al recordatorio de InBody. No se han cambiado registros reales, tablas ni políticas de Supabase.
+
+### Consejos Y Stats En 2.9.3
+
+- **Solo subir:** mantener/bajar no muestran panel; una propuesta respaldada puede seguir visible para la próxima sesión. Se conservan la advertencia de molestia y las explicaciones de referencias insuficientes o planes especiales.
+- **PR e historial tras reimportar:** un ID nuevo no corta una coincidencia única y comparable. No se adivinan ejercicios ambiguos ni metadatos antiguos.
+- **Avisos juntos:** InBody y cambio de rutina ocupan una franja superior, con siguiente/pausa y rotación sin mover el contenido. Respeta foco, interacción y movimiento reducido.
+- **Stats en tres vistas:** Fuerza reúne cargas, marcas y curvas; Cuerpo prioriza composición y evolución InBody; Constancia muestra actividad semanal. Fuerza no es un ranking ni un 1RM estimado.
+- **Lo que noté:** comparaciones recientes desde dos fechas, cargas estables o tendencias sostenidas, con sus registros de origen. Se separan contexto, ciclo y reps; no se deduce esfuerzo ni ganancia de fuerza.
+
+Entrega local probada con datos ficticios. Falta revisar el día 1 y los PR reales de Miguel cuando se recupere el acceso al navegador, además de Safari/PWA físico y aprobación visual.
 
 ### Rutinas Del Gym Y Acabado En 2.9.2
 
@@ -214,7 +224,7 @@ Las sesiones conservan una copia de su rutina, llamada *snapshot*. Por eso, camb
 
 ### 4. Sugerencias De Carga
 
-La app puede mostrar **«Considera subir la carga»**, **«Mantén la carga»** o **«Considera bajar la carga»**. No calcula un peso recomendado ni convierte kg y lb.
+La app muestra **«Considera subir la carga»** solo cuando tiene evidencia. Mantener o bajar no producen un panel. No calcula un peso recomendado ni convierte kg y lb.
 
 La sugerencia de subir requiere tres entrenamientos completos y comparables del ejercicio:
 
@@ -224,7 +234,7 @@ La sugerencia de subir requiere tres entrenamientos completos y comparables del 
 - Dentro de las últimas seis semanas, con al menos uno en las últimas dos.
 - Sin señales incompatibles, como molestias registradas o cambios de carga durante las series anteriores del entrenamiento actual.
 
-Si la última serie quedó por debajo de las reps previstas, puede sugerir bajar. En ejercicios asistidos, el mensaje habla de **más o menos asistencia**, porque la relación entre carga y dificultad es diferente.
+Una serie por debajo de las reps previstas impide proponer subir. En ejercicios asistidos, aumentar la dificultad se expresa como **menos asistencia**. Las molestias mantienen su advertencia y nunca habilitan una subida.
 
 La sugerencia **nunca sustituye el peso anterior del campo ni cambia el plan del coach**. No requiere responder preguntas de esfuerzo. Las reps precargadas no demuestran que una serie haya sido fácil: la técnica y tus sensaciones siguen siendo imprescindibles.
 
