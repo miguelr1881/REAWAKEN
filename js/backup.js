@@ -19,7 +19,7 @@ export function prepareBackup(parsed) {
   if (!object(parsed) || parsed.app !== 'gymtrack' || !Array.isArray(parsed.sessions)) {
     throw new Error('Ese archivo no es un respaldo de REAWAKEN.');
   }
-  if (parsed.version !== undefined && (!Number.isInteger(parsed.version) || parsed.version < 1 || parsed.version > 4)) {
+  if (parsed.version !== undefined && (!Number.isInteger(parsed.version) || parsed.version < 1 || parsed.version > 5)) {
     throw new Error('Version de respaldo no compatible. Actualiza la app antes de importarlo.');
   }
   const validators = {
@@ -48,8 +48,10 @@ export function prepareBackup(parsed) {
   }
   if (parsed.preferences !== undefined) prepared.preferences = validateTrainingPreferences(parsed.preferences);
   if (parsed.personalProfile !== undefined) prepared.personalProfile = validatePersonalProfile(parsed.personalProfile);
-  if (!Object.values(prepared).some(records => Array.isArray(records) && records.length) && !Object.keys(prepared.preferences || {}).length && !prepared.personalProfile) throw new Error('El respaldo esta vacio.');
+  if (parsed.exerciseRatings !== undefined) prepared.exerciseRatings = validateExerciseRatings(parsed.exerciseRatings);
+  if (!Object.values(prepared).some(records => Array.isArray(records) && records.length) && !Object.keys(prepared.preferences || {}).length && !prepared.personalProfile && !Object.keys(prepared.exerciseRatings || {}).length) throw new Error('El respaldo esta vacio.');
   return prepared;
 }
 import { validateTrainingPreferences } from './training-preferences.js';
 import { validatePersonalProfile } from './profile.js';
+import { validateExerciseRatings } from './exercise-ratings.js';

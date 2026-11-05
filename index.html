@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="es" data-build="2.9.3" data-boot="loading">
+<html lang="es" data-build="2.9.12" data-boot="loading">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -34,7 +34,7 @@
 <link rel="icon" type="image/svg+xml" href="favicon.svg" />
 <link rel="icon" type="image/png" href="icons/icon-192.png" />
 <link rel="preload" href="fonts/BarlowSemiCondensed-Bold.ttf" as="font" type="font/ttf" crossorigin />
-<link id="app-style" rel="stylesheet" href="css/styles.css?v=2.9.3" onerror="document.documentElement.dataset.styleError='true'" />
+<link id="app-style" rel="stylesheet" href="css/styles.css?v=2.9.12" onerror="document.documentElement.dataset.styleError='true'" />
 </head>
 <body>
 
@@ -74,7 +74,6 @@
 
       <div id="resume-slot"></div>
       <div id="next-slot"></div>
-      <button class="open-training-progress progress-entry" id="home-progress"><span>Tu balance</span><small>Semana · Recuperación · Lo que noté</small><span aria-hidden="true">›</span></button>
 
       <h2 class="section-title" id="routine-heading">Tu rutina</h2>
       <div class="day-list" id="day-list"></div>
@@ -120,6 +119,10 @@
   <section class="view" id="view-body">
     <div class="page">
       <header class="section-masthead"><div><span class="eyebrow">REAWAKEN</span><h1 class="title-xl">Stats</h1></div><span class="section-index" aria-hidden="true">02</span></header>
+      <div class="stats-muscle-tools" aria-label="Análisis muscular">
+        <button class="battery-entry" id="stats-battery"><span><span class="muscle-tool-icon" aria-hidden="true"><img src="icons/battery-charging.svg" width="22" height="22" alt=""></span><strong>Muscle Battery</strong><small>Carga reciente</small></span><span aria-hidden="true">›</span></button>
+        <button class="battery-entry muscle-work-entry" id="stats-muscle-work"><span><span class="muscle-tool-icon" aria-hidden="true"><img src="icons/chart-column.svg" width="22" height="22" alt=""></span><strong>Trabajo por músculo</strong><small>Series por período</small></span><span aria-hidden="true">›</span></button>
+      </div>
       <div class="seg stats-tabs" role="tablist" aria-label="Estadísticas">
         <button id="stats-tab-strength" role="tab" data-stats="strength" aria-controls="stats-panel" aria-selected="true">Fuerza</button>
         <button id="stats-tab-body" role="tab" data-stats="body" aria-controls="stats-panel" aria-selected="false" tabindex="-1">Cuerpo</button>
@@ -127,7 +130,7 @@
       </div>
       <p class="date" id="body-sub">—</p>
       <div id="stats-panel" role="tabpanel" aria-labelledby="stats-tab-strength"><div id="body-slot"></div></div>
-      <button class="open-training-progress progress-entry" id="stats-progress"><span>Progreso del entrenamiento</span><small>Semana · Mes · Ciclo</small><span aria-hidden="true">›</span></button>
+      <button class="open-training-progress progress-entry" id="stats-progress"><span>Resumen por período</span><small>Día · Semana · Mes · Ciclo</small><span aria-hidden="true">›</span></button>
       <button class="btn btn-ghost" id="btn-add-measure" style="margin-top:18px">+ Nueva medición InBody</button>
     </div>
   </section>
@@ -191,7 +194,7 @@
 
       <h2 class="section-title">Entrenamiento</h2>
       <div class="list-card">
-        <button class="list-row" id="btn-training-preferences"><div class="lr-body"><strong>Descanso y pantalla</strong><small id="training-preferences-summary">45 s por defecto</small></div><span aria-hidden="true">›</span></button>
+        <button class="list-row" id="btn-training-preferences"><div class="lr-body"><strong>Preferencias de entrenamiento</strong><small id="training-preferences-summary">45 s por defecto</small></div><span aria-hidden="true">›</span></button>
         <button class="list-row" id="btn-edit-routine">
           <div class="lr-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg>
@@ -206,6 +209,7 @@
           <div class="lr-body"><strong>Ejercicios</strong><small id="exercise-summary">—</small></div>
           <svg class="chev" width="8" height="14" viewBox="0 0 8 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 1l6 6-6 6"/></svg>
         </button>
+        <button class="list-row" id="btn-exercise-ratings"><div class="lr-body"><strong>Calificar ejercicios</strong><small>Preferencias por rutina</small></div><span aria-hidden="true">›</span></button>
         <button class="list-row" id="btn-routine-date"><div class="lr-body"><strong>Fecha de cambio de rutina</strong><small id="routine-change"></small></div><span aria-hidden="true">›</span></button>
         <button class="list-row" id="btn-settings-inbody"><div class="lr-body"><strong>Registrar InBody</strong><small id="inbody-schedule">Cada día 1</small></div><span aria-hidden="true">+</span></button>
       </div>
@@ -251,7 +255,7 @@
         <button class="list-row" id="btn-functions"><span class="lr-body"><strong>Guía rápida</strong></span><span aria-hidden="true">›</span></button>
       </div>
 
-      <div class="app-build"><span id="app-version">REAWAKEN · 2.9.3</span><button id="btn-check-update" class="btn btn-ghost">Buscar actualización</button><small id="update-status" role="status"></small></div>
+      <div class="app-build"><span id="app-version">REAWAKEN · 2.9.12</span><button id="btn-check-update" class="btn btn-ghost">Buscar actualización</button><small id="update-status" role="status"></small></div>
     </div>
   </section>
 
@@ -344,6 +348,6 @@
     }, true);
   })();
 </script>
-<script id="app-script" type="module" src="js/app.js?v=2.9.3"></script>
+<script id="app-script" type="module" src="js/app.js?v=2.9.12"></script>
 </body>
 </html>

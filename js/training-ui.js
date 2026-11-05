@@ -1,11 +1,13 @@
 import { repPrescription, repTarget, equipmentChoice, setRecord, nextSetAdvice, normalizeExercise, periodBounds, periodSummary, recoveryEstimate, trainingInsights, repChanges, weeklyRepAdvice } from './intelligence.js';
 import { MUSCLE_GROUPS, muscleAtlas, dayFocus } from './exercise-info.js';
+import { enterView } from './motion.js';
 
 export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, saveSession, redraw, showSession, onRecordChange, onSaveError = () => {} }) {
   const select = selector => document.querySelector(selector);
   const selectAll = selector => [...document.querySelectorAll(selector)];
   let reportMode = 'week', reportAnchor = Date.now(), reportCycle = 'legacy';
   let pointerActive = false, pointerBound = false;
+  let muscleHeaderObserver = null;
   const pendingAdvice = new Map();
   const date = timestamp => new Date(timestamp).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric' });
   const tracking = session => {
@@ -63,7 +65,7 @@ export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, sa
       return typeof raw !== 'string' || raw.trim() === '' || !Number.isFinite(Number(raw)) || Number(raw) < 0;
     });
     const candidate = nextSetAdvice(session, movement, next ?? block.sets, state.sessions, dayFor);
-    const referenceOnly = next !== undefined && (!repTarget(movement) || candidate.text === 'Primera referencia');
+    const referenceOnly = next !== undefined && (!repTarget(movement) || candidate.text === 'Primera referencia' || candidate.code === 'coach-load');
     const advice = candidate.direction === 'increase' || candidate.code === 'discomfort' ? candidate : null;
     const weekly = weeklyRepAdvice(session, movement, state.sessions, dayFor);
     return `${advice ? `<div class="next-advice"><div><span class="eyebrow">${next === undefined ? 'Próxima sesión' : `Siguiente · Serie ${next + 1}`}</span><strong>${esc(advice.text)}</strong><small>${esc(advice.reason)}</small></div></div>` : ''}${referenceOnly ? `<p class="training-caption advice-status" role="status">${esc(candidate.text)} · ${esc(candidate.reason)}</p>` : ''}${weekly ? `<p class="training-caption weekly-reps">${esc(weekly.text)}</p>` : ''}`;
@@ -141,7 +143,7 @@ export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, sa
 
   function insightsHtml() {
     const insights = trainingInsights(state.sessions, dayFor, { includeRecent: true });
-    return `<section class="training-insights"><h3 class="training-section-title">Lo que noté</h3><p class="training-caption">Tus registros comparables</p>${insights.length ? insights.map((insight, index) => `<button class="insight-row" data-insight="${index}"><span class="eyebrow">${esc(insight.label)}</span><strong>${esc(insight.title)}</strong><p>${esc(insight.text)}</p><small>Ver las ${insight.sample.length} sesiones</small></button>`).join('') : `<p class="report-empty">${state.sessions.some(session => session.finishedAt && !session.deletedAt) ? 'Aún no hay dos fechas con la misma primera serie, reps, equipo y ciclo. Tus registros siguen disponibles en Historial.' : 'Sin entrenamientos finalizados para comparar.'}</p>`}</section>`;
+    return `<section class="training-insights"><h3 class="training-section-title">Tendencias</h3><p class="training-caption">Tus registros comparables</p>${insights.length ? insights.map((insight, index) => `<button class="insight-row" data-insight="${index}"><span class="eyebrow">${esc(insight.label)}</span><strong>${esc(insight.title)}</strong><p>${esc(insight.text)}</p><small>Ver las ${insight.sample.length} sesiones</small></button>`).join('') : `<p class="report-empty">${state.sessions.some(session => session.finishedAt && !session.deletedAt) ? 'Aún no hay dos fechas con la misma primera serie, reps, equipo y ciclo. Tus registros siguen disponibles en Historial.' : 'Sin entrenamientos finalizados para comparar.'}</p>`}</section>`;
   }
 
   function bindInsights(container, onBack) {
@@ -153,6 +155,106 @@ export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, sa
       select('#evidence-back').onclick = onBack;
       selectAll('[data-evidence-session]').forEach(item => { item.onclick = () => showSession(item.dataset.evidenceSession); });
     }; });
+  }
+
+  function bindMuscleHeader() {
+    muscleHeaderObserver?.disconnect();
+    const sheet = select('#sheet');
+    const toolbar = sheet.querySelector('.sheet-toolbar');
+    const heading = sheet.querySelector('.battery-view > h2, .muscle-work-view > h2');
+    if (!toolbar || !heading || typeof IntersectionObserver !== 'function') return;
+    const compact = document.createElement('strong');
+    compact.className = 'muscle-compact-title';
+    compact.textContent = heading.textContent;
+    compact.setAttribute('aria-hidden', 'true');
+    toolbar.prepend(compact);
+    const observer = new IntersectionObserver(() => {
+      if (!heading.isConnected) { observer.disconnect(); return; }
+      compact.classList.toggle('visible', heading.getBoundingClientRect().top < toolbar.getBoundingClientRect().bottom);
+    }, { root: sheet, rootMargin: `-${toolbar.offsetHeight}px 0px 0px 0px`, threshold: [0, 1] });
+    observer.observe(heading);
+    muscleHeaderObserver = observer;
+  }
+
+  function openBattery() {
+    const recovery = recoveryEstimate(state.sessions, dayFor);
+    const muscles = Object.entries(MUSCLE_GROUPS).filter(([group]) => !['none', 'cardio', 'full'].includes(group));
+    const byGroup = new Map(recovery.map(item => [item.group, item]));
+    let selected = [...recovery].sort((first, second) => second.load - first.load)[0]?.group || muscles[0][0];
+    let focusReady = false;
+    openSheet(`<section class="battery-view"><span class="eyebrow">Ahora · Últimos 14 días</span><h2>Muscle Battery</h2>
+      <div class="battery-overview"><div class="recovery-atlas battery-map" id="battery-map">${muscleAtlas(recovery.map(item => item.group))}</div><div class="battery-focus" id="battery-focus" role="status" aria-live="polite"></div></div>
+      <div class="battery-legend" aria-label="Niveles de carga reciente"><span data-level="low">Menor</span><span data-level="medium">Media</span><span data-level="high">Elevada</span><span data-level="unknown">Sin datos</span></div>
+      <div class="battery-muscles" role="group" aria-label="Grupos musculares">${muscles.map(([group, name]) => {
+        const item = byGroup.get(group);
+        return `<button type="button" class="battery-muscle" data-battery-group="${group}" data-level="${item?.level || 'unknown'}" aria-pressed="${selected === group}"><strong>${esc(name)}</strong><small>${esc(item?.label || 'Sin registros recientes')}</small></button>`;
+      }).join('')}</div><p class="battery-caveat">Estimación de tus registros, no una medición de recuperación ni de fuerza. Sin datos no significa recuperado.</p></section>`);
+    const renderFocus = () => {
+      const item = byGroup.get(selected);
+      select('#battery-focus').dataset.level = item?.level || 'unknown';
+      select('#battery-focus').innerHTML = `<span class="eyebrow">${esc(MUSCLE_GROUPS[selected])}</span><h3>${esc(item?.label || 'Sin registros recientes')}</h3>${item ? `<p>Último registro<br><strong>${date(item.latest)}</strong></p><span class="battery-series">${item.sets.toLocaleString('es-MX', { maximumFractionDigits: 1 })}<small>series ponderadas</small></span>` : '<p>No hay trabajo registrado para esta zona en los últimos 14 días.</p>'}`;
+      selectAll('[data-battery-group]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.batteryGroup === selected)));
+      selectAll('#battery-map [data-region]').forEach(region => {
+        region.dataset.level = byGroup.get(region.dataset.region)?.level || 'unknown';
+        region.classList.toggle('battery-selected', region.dataset.region === selected);
+      });
+      if (focusReady) enterView(select('#battery-focus'), 0);
+      focusReady = true;
+    };
+    selectAll('[data-battery-group]').forEach(button => { button.onclick = () => { selected = button.dataset.batteryGroup; renderFocus(); }; });
+    select('#battery-map').onclick = event => {
+      const region = event.target.closest('[data-region]');
+      if (!region || !muscles.some(([group]) => group === region.dataset.region)) return;
+      selected = region.dataset.region;
+      renderFocus();
+    };
+    renderFocus();
+    bindMuscleHeader();
+  }
+
+  function openMuscleWork(mode = 'week', anchor = Date.now(), cycleId = state.routine[0]?.cycleId || 'legacy') {
+    const cycles = new Map([['legacy', 'Historial sin ciclo']]);
+    for (const session of state.sessions) if (session.entries?._cycle) cycles.set(session.entries._cycle.id, session.entries._cycle.name);
+    for (const day of state.routine) if (day.cycleId) cycles.set(day.cycleId, day.cycleName || 'Rutina actual');
+    const bounds = mode === 'cycle' ? { start: 0, end: Date.now() + 1 } : periodBounds(mode, anchor);
+    const summary = periodSummary(state.sessions, dayFor, bounds, mode === 'cycle' ? cycleId : null);
+    const groups = summary.groups;
+    let selected = groups[0]?.[0] || null;
+    let focusReady = false;
+    const label = mode === 'cycle' ? cycles.get(cycleId) || 'Ciclo' : mode === 'day' ? date(bounds.start) : `${date(bounds.start)} · ${date(bounds.end - 1)}`;
+    const countLabel = value => value.toLocaleString('es-MX', { maximumFractionDigits: 1 });
+    openSheet(`<section class="muscle-work-view"><span class="eyebrow">Tu entrenamiento registrado</span><h2>Trabajo por músculo</h2>
+      <div class="seg report-tabs" role="group" aria-label="Período del trabajo muscular">${[['day', 'Día'], ['week', 'Semana'], ['month', 'Mes'], ['cycle', 'Ciclo']].map(([value, title]) => `<button type="button" data-work-mode="${value}" class="${mode === value ? 'on' : ''}" aria-pressed="${mode === value}">${title}</button>`).join('')}</div>
+      ${mode === 'cycle' ? `<div class="field"><label for="muscle-work-cycle">Ciclo de entrenamiento</label><select id="muscle-work-cycle">${[...cycles].map(([id, name]) => `<option value="${esc(id)}" ${id === cycleId ? 'selected' : ''}>${esc(name)}</option>`).join('')}</select></div>` : `<div class="report-navigation"><button type="button" class="icon-btn" data-work-step="-1" aria-label="Período anterior">‹</button><strong>${esc(label)}</strong><button type="button" class="icon-btn" data-work-step="1" aria-label="Período siguiente" ${bounds.end > Date.now() ? 'disabled' : ''}>›</button></div>`}
+      <div class="muscle-work-overview"><div class="muscle-work-map" id="muscle-work-map">${muscleAtlas(groups.map(([group]) => group))}</div><div class="muscle-work-focus" id="muscle-work-focus" role="status" aria-live="polite"></div></div>
+      <div class="muscle-work-list" role="group" aria-label="Trabajo registrado por grupo muscular">${groups.map(([group, count]) => `<button type="button" class="muscle-work-row" data-work-group="${group}" aria-pressed="${selected === group}"><span>${esc(MUSCLE_GROUPS[group])}</span><progress value="${count}" max="${groups[0][1]}" aria-label="${esc(MUSCLE_GROUPS[group])}: ${countLabel(count)} series ponderadas"></progress><b>${countLabel(count)}</b></button>`).join('')}</div>
+      <p class="training-caption muscle-work-context">${summary.sessions.length} ${summary.sessions.length === 1 ? 'sesión registrada' : 'sesiones registradas'}${summary.approximate ? ' · Incluye registros antiguos aproximados' : ''}</p>
+      <details class="report-details"><summary>Cómo se cuenta</summary><p class="training-caption">Series registradas de los ejercicios de carga. La participación secundaria cuenta parcialmente; una serie puede contribuir a varios músculos. No mide kilos por músculo, intensidad, recuperación ni fuerza.</p></details></section>`);
+    const renderSelected = () => {
+      const count = groups.find(([group]) => group === selected)?.[1];
+      select('#muscle-work-focus').innerHTML = selected ? `<span class="eyebrow">${esc(MUSCLE_GROUPS[selected])}</span><strong>${countLabel(count)}</strong><span>series ponderadas</span>` : '<h3>Sin trabajo registrado</h3><p>No hay series clasificables en este período.</p>';
+      selectAll('[data-work-group]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.workGroup === selected)));
+      selectAll('#muscle-work-map [data-region]').forEach(region => region.classList.toggle('muscle-work-selected', region.dataset.region === selected));
+      if (focusReady) enterView(select('#muscle-work-focus'), 0);
+      focusReady = true;
+    };
+    selectAll('[data-work-group]').forEach(button => { button.onclick = () => { selected = button.dataset.workGroup; renderSelected(); }; });
+    select('#muscle-work-map').onclick = event => {
+      const region = event.target.closest('[data-region]');
+      if (!region || !groups.some(([group]) => group === region.dataset.region)) return;
+      selected = region.dataset.region;
+      renderSelected();
+    };
+    selectAll('[data-work-mode]').forEach(button => { button.onclick = () => openMuscleWork(button.dataset.workMode, anchor, cycleId); });
+    selectAll('[data-work-step]').forEach(button => { button.onclick = () => {
+      const target = new Date(bounds.start), step = Number(button.dataset.workStep);
+      if (mode === 'month') target.setMonth(target.getMonth() + step);
+      else target.setDate(target.getDate() + step * (mode === 'week' ? 7 : 1));
+      openMuscleWork(mode, target.getTime(), cycleId);
+    }; });
+    if (select('#muscle-work-cycle')) select('#muscle-work-cycle').onchange = event => openMuscleWork('cycle', anchor, event.target.value);
+    renderSelected();
+    bindMuscleHeader();
   }
 
   function openProgress(mode = reportMode, anchor = reportAnchor, cycleId = reportCycle) {
@@ -186,5 +288,5 @@ export function createTrainingUI({ state, dayFor, esc, openSheet, closeSheet, sa
     for (const item of recovery) selectAll(`.recovery-atlas [data-region="${item.group}"]`).forEach(region => { region.dataset.level = item.level; });
   }
 
-  return { seedChoices, repsInput, updateInlineRecord, extras, bind, refreshAdvice, workoutNote, openProgress, recordText, repChangesHtml, insightsHtml, bindInsights };
+  return { seedChoices, repsInput, updateInlineRecord, extras, bind, refreshAdvice, workoutNote, openProgress, openBattery, openMuscleWork, recordText, repChangesHtml, insightsHtml, bindInsights };
 }

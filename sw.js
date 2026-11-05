@@ -1,4 +1,4 @@
-const CACHE = 'reawaken-v50';
+const CACHE = 'reawaken-v63';
 const ASSETS = [
   './',
   './index.html',
@@ -17,6 +17,7 @@ const ASSETS = [
   './js/training-ui.js',
   './js/exercise-info.js',
   './js/exercise-catalog.js',
+  './js/exercise-ratings.js',
   './js/db.js',
   './js/backup.js',
   './js/routine.js',
@@ -33,6 +34,8 @@ const ASSETS = [
   './manifest.webmanifest',
   './icons/icon-180.png',
   './icons/trophy.svg',
+  './icons/battery-charging.svg',
+  './icons/chart-column.svg',
   './icons/clipboard-check.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',

@@ -8,7 +8,7 @@
 
 Una app de entrenamiento personal que funciona sin conexión, conserva tu historial y convierte tus registros en una colección de progreso.
 
-![Versión](https://img.shields.io/badge/versión-2.9.3-5B3DF5?style=flat-square)
+![Versión](https://img.shields.io/badge/versión-2.9.12-5B3DF5?style=flat-square)
 ![PWA](https://img.shields.io/badge/PWA-offline--first-087982?style=flat-square)
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES_modules-F7DF1E?style=flat-square&logo=javascript&logoColor=14141a)
 ![Nube opcional](https://img.shields.io/badge/Supabase-opcional-167D36?style=flat-square)
@@ -25,7 +25,7 @@ REAWAKEN es una **PWA de registro de entrenamiento**, diseñada para consultarse
 
 Desde el 14 de octubre de 2026, el alcance es **uso exclusivo de Miguel**: sin marketplace, comunidad, rankings ni reseñas para terceros. La petición del 15 de octubre prioriza estética y mejoras de uso diario, sin exigir identificar kg o lb ni cambiar datos reales.
 
-La versión de esta carpeta es **2.9.3**. La actualización del sitio oficial queda disponible cuando finaliza el despliegue de GitHub Pages; comprueba la versión instalada en Ajustes. Las pruebas automatizadas no sustituyen la revisión de los datos reales ni de Safari/PWA en el iPhone.
+La versión local de esta carpeta es **2.9.12**, sin publicar. La última entrega publicada es **2.9.3**. Las pruebas automatizadas no sustituyen la revisión de los datos reales ni de Safari/PWA en el iPhone.
 
 La idea es sencilla: **registrar lo que hiciste sin convertir cada serie en un formulario**. Las repeticiones del plan ya están visibles, el peso anterior sirve de referencia y puedes corregir lo necesario directamente en el ejercicio.
 
@@ -112,6 +112,60 @@ Cuando falta una referencia comparable o el plan es especial, aparece una explic
 **Tu progreso por ejercicio** reúne un buscador, sesiones y una curva de cargas. Cada punto es el máximo de una sesión para las mismas reps, plan y contexto declarado; equipos, variantes, notas o unidades diferentes quedan separados. Permite seguir la escala habitual sin convertir kg/lb. No calcula un 1RM, percentil ni nivel de fuerza, ni inventa metadatos de registros antiguos. Corregir un peso actualiza la curva y las referencias de PR sin celebrar de nuevo el entrenamiento pasado.
 
 La entrega también revisa jerarquía de Inicio, tarjetas, controles de entrenamiento, calendario y hojas en claro/oscuro. El entrenamiento conserva el protagonismo frente al recordatorio de InBody. No se han cambiado registros reales, tablas ni políticas de Supabase.
+
+### Unidades Nativas En 2.9.12
+
+Cuando hay una unidad registrada, el campo de peso indica lb o kg. Las mancuernas pueden conservarse en lb sin convertir el número que escribes. Historial, referencias y curvas mantienen esa unidad; la relación con InBody convierte solo para comparar magnitudes compatibles, sin alterar el registro.
+
+La revisión de unidades conserva valores originales y distingue origen y destino por ejercicio. No reconstruye libras desde kg redondeados ni modifica automáticamente sesiones del teléfono.
+
+### Generador Por Cantidad En 2.9.11
+
+Cantidad es el modo inicial: seis ejercicios ajustables y cardio aparte, con cero, uno o dos bloques. La selección respeta tus fuentes y estrellas sin repetir ejercicios para llegar al número. La prioridad muscular sigue siendo opcional.
+
+El tiempo se muestra como referencia desplegable y no limita los ejercicios; el modo Tiempo permanece disponible. Volver, editar, guardar una rutina nueva, respaldar y recargar conserva la cantidad y los bloques de cardio sin alterar el plan de origen.
+
+### Cierre Automático En 2.9.10
+
+Preferencias de entrenamiento incluye el cierre tras 1 h, 1 h 30 min, 2 h, 2 h 30 min, 3 h, un valor personalizado de 15 a 360 minutos o Desactivado. La sesión captura el límite al comenzar, sin cambiar sesiones en curso ni registros antiguos.
+
+El cierre conserva lo registrado, detiene el temporizador y deja una revisión persistente: Revisar sesión o Dejar así. Si la PWA estuvo suspendida, aplica el cierre al regresar con la hora límite correcta. No completa series pendientes ni descarta formularios sin guardar. No requiere notificaciones push.
+
+### Mapa Corporal En 2.9.9
+
+Fuerza muestra un cuerpo seleccionable con Progreso y Cobertura: cargas comparables, referencia corporal fechada, trabajo directo/secundario y plan frente a registros de 28 días. La relación con tu peso no es una medida de fuerza ni permite comparar máquinas.
+
+Sugerencias del mapa corporal es opcional, apagada de inicio y guardada en respaldo. Puedes revisar una zona como prioridad de una rutina nueva o elegir Sin prioridad extra. Fuentes, estrellas y duración siguen siendo explícitas; tu plan no cambia automáticamente. Los modales se mantienen.
+
+### Sesiones Completas En 2.9.8
+
+El generador cuenta calentamiento, trabajo muscular, descansos, cambios de equipo y cardio dentro del tiempo total. El cardio puede tener duración fija o completar explícitamente el tiempo restante, entre 5 y 60 minutos. No se añaden series de fuerza solo para alargar la sesión.
+
+Cada día muestra un desglose aproximado. Calentamiento y cardio son bloques con temporizador que se conservan al editar, guardar una rutina nueva, respaldar y recargar. Solo se usan las fuentes elegidas y las calificaciones permitidas; los planes de origen e historial quedan intactos. Se mantienen los días flexibles, el enfoque y la revisión previa del coach.
+
+### Inicio Más Simple En 2.9.7
+
+Tu balance deja de aparecer en Inicio. Su contenido completo se conserva en **Stats → Constancia → Resumen por período**, incluidos minutos, cumplimiento, reps ajustadas y ciclos. Los accesos directos a Muscle Battery y Trabajo por músculo siguen en Stats.
+
+### Pulido Visual En 2.9.6
+
+Accesos musculares con iconos locales y cristal moderado; mapas y cifras legibles, selección suave, barras consistentes y título compacto al desplazarse. Conserva la identidad de REAWAKEN y respeta mayor contraste y movimiento reducido. Es una aproximación visual para la PWA, no Liquid Glass nativo. No cambia cálculos ni registros.
+
+### Muscle Battery Y Trabajo Por Músculo En 2.9.5
+
+Ambas funciones tienen acceso directo al inicio de Stats. Muscle Battery conserva su estimación de carga reciente, ahora en una hoja con mapa y zonas seleccionables. Trabajo por músculo muestra las series ponderadas por día, semana, mes o ciclo, con mapa y barras interactivas. Sus apartados anteriores en Tu balance siguen disponibles.
+
+Los cálculos no cambian: no son porcentajes de recuperación, kilos por músculo ni niveles de fuerza. Consultarlos no altera registros. Esta entrega no convierte unidades ni modifica la cuenta remota.
+
+### Generador Y Progresión En 2.9.4
+
+- Días flexibles de 1 a 7 y tiempos claros: 30/45 min, 1 h, 1 h 30 min, 2 h o a medida. Enfoque, experiencia, equipo y descanso quedan en opciones adicionales.
+- Puedes elegir qué rutinas guardadas aportan ejercicios. El catálogo sigue siendo una elección explícita.
+- Borrador por día con tiempo estimado, mapa muscular, Google Imágenes y revisión antes de guardar una rutina nueva e inactiva. No se añaden series para llenar el tiempo disponible.
+- Las propuestas de subir comparan cada posición de serie entre tres sesiones completas. Un patrón repetido como 20/25/30 ya no se rechaza solo por no usar un único peso.
+- Se conservan las precauciones y se respetan indicaciones de carga mínima, ligera, no exigente o sin peso. Las reps precargadas no miden esfuerzo; esta regla es orientativa, no una prescripción individual.
+
+Referencias: [ACSM 2026](https://pubmed.ncbi.nlm.nih.gov/41843416/), [NN/g sobre simplificación progresiva](https://www.nngroup.com/articles/progressive-disclosure/) y [Apple HIG sobre selectores](https://developer.apple.com/design/human-interface-guidelines/pickers).
 
 ### Consejos Y Stats En 2.9.3
 
@@ -229,7 +283,7 @@ La app muestra **«Considera subir la carga»** solo cuando tiene evidencia. Man
 La sugerencia de subir requiere tres entrenamientos completos y comparables del ejercicio:
 
 - Realizados en días distintos y dentro del mismo ciclo.
-- Con la misma carga registrada y la misma cantidad de series.
+- Con el mismo patrón de cargas por posición y la misma cantidad de series.
 - Con todas las series en el extremo alto de las reps previstas.
 - Dentro de las últimas seis semanas, con al menos uno en las últimas dos.
 - Sin señales incompatibles, como molestias registradas o cambios de carga durante las series anteriores del entrenamiento actual.
