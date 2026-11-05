@@ -1,7 +1,9 @@
-import { repTarget, nextSetAdvice, comparisonKey, personalBestForSet, periodBounds, periodSummary, trainingInsights, recoveryEstimate, muscleContributions, setRecord, machineAlternative, repChanges, weeklyRepAdvice } from '../js/intelligence.js';
+import { repTarget, assisted, nextSetAdvice, comparisonKey, personalBestForSet, periodBounds, periodSummary, trainingInsights, recoveryEstimate, muscleContributions, setRecord, machineAlternative, repChanges, weeklyRepAdvice } from '../js/intelligence.js';
 import { sanitizeRoutine } from '../js/routine-parser.js';
 import { createTrainingUI } from '../js/training-ui.js';
 import { sessionPersonalRecords } from '../js/personal-records.js';
+import { EXERCISE_CATALOG } from '../js/exercise-catalog.js';
+import { DEFAULT_ROUTINE } from '../js/routine.js';
 
 export function runIntelligenceTests() {
   let checks = 0;
@@ -42,6 +44,42 @@ export function runIntelligenceTests() {
   assert(nextSetAdvice(freshAdvice, movement, 0, consistent, dayFor).load === undefined, 'increase never changes numeric prefill');
   assert(nextSetAdvice(freshAdvice, movement, 0, consistent, dayFor).reason.includes('precargadas'), 'preset reps caveat visible');
   assert(nextSetAdvice(freshAdvice, movement, 0, consistent.slice(1), dayFor).direction === 'maintain', 'two sessions insufficient');
+  const repeatedLoadsBySet = structuredClone(consistent);
+  for (const previous of repeatedLoadsBySet) {
+    previous.entries[movement.id] = ['45', '50'];
+    previous.entries._training.sets[movement.id][0].load = 45;
+    previous.entries._training.sets[movement.id][1].load = 50;
+  }
+  assert(nextSetAdvice(freshAdvice, movement, 0, repeatedLoadsBySet, dayFor).direction === 'increase', 'three repeated per-set loads support progression without requiring every set to use the same weight');
+  const rampSession = structuredClone(freshAdvice);
+  rampSession.entries[movement.id][0] = '45';
+  rampSession.entries._training.sets[movement.id][0] = { ...choice, load: 45, reps: 10, rir: null, repsSource: 'plan' };
+  assert(nextSetAdvice(rampSession, movement, 1, repeatedLoadsBySet, dayFor).direction === 'increase', 'current first set compares with the historical first set');
+  rampSession.entries[movement.id][1] = '50';
+  rampSession.entries._training.sets[movement.id][1] = { ...choice, load: 50, reps: 10, rir: null, repsSource: 'plan' };
+  assert(nextSetAdvice(rampSession, movement, 2, repeatedLoadsBySet, dayFor).direction === 'increase', 'completed per-set pattern supports the next-session suggestion');
+  for (const change of [
+    session => { session.entries[movement.id][0] = '46'; session.entries._training.sets[movement.id][0].load = 46; },
+    session => { session.entries._training.sets[movement.id][0].reps = 8; },
+    session => { session.entries._training.sets[movement.id][0].discomfort = true; },
+    session => { session.entries[movement.id] = ['50', '45']; session.entries._training.sets[movement.id][0].load = 50; session.entries._training.sets[movement.id][1].load = 45; }
+  ]) {
+    const changed = structuredClone(rampSession); change(changed);
+    assert(nextSetAdvice(changed, movement, 2, repeatedLoadsBySet, dayFor).direction !== 'increase', 'changed per-set load, order, reps or discomfort prevents progression');
+  }
+  const swappedHistory = structuredClone(repeatedLoadsBySet);
+  swappedHistory[0].entries[movement.id] = ['50', '45'];
+  swappedHistory[0].entries._training.sets[movement.id][0].load = 50;
+  swappedHistory[0].entries._training.sets[movement.id][1].load = 45;
+  assert(nextSetAdvice(freshAdvice, movement, 0, swappedHistory, dayFor).direction !== 'increase', 'the same total load in a different set order is not equivalent evidence');
+  for (const note of ['Peso mínimo', 'Peso ligero', 'Peso no exigente', 'Sin peso']) {
+    const limited = { ...movement, note };
+    const limitedSession = structuredClone(freshAdvice);
+    limitedSession.routineSnapshot.blocks[0].movements[0] = limited;
+    const limitedHistory = structuredClone(consistent);
+    limitedHistory.forEach(session => { session.routineSnapshot.blocks[0].movements[0] = limited; });
+    assert(nextSetAdvice(limitedSession, limited, 0, limitedHistory, dayFor).code === 'coach-load', 'explicit low-load instructions override automatic progression');
+  }
   const reimported = structuredClone(freshAdvice);
   const reimportedMovement = reimported.routineSnapshot.blocks[0].movements[0];
   reimportedMovement.id = 'reimported-movement';
@@ -267,5 +305,61 @@ export function runIntelligenceTests() {
     assert(personalBestForSet(prSession, movement, 0, [previous], dayFor) === null, 'incompatible, ambiguous, deleted or unfinished history cannot create a PR');
   }
   assert(JSON.stringify([prSession, prHistory]) === prBefore, 'PR detection does not rewrite records or snapshots');
-  return { checks, result: 'PASS' };
+  const exerciseCoverage = {};
+  const sources = {
+    catalog: EXERCISE_CATALOG.map(exercise => ({ ...exercise, reps: exercise.reps || '10' })),
+    compatibilityPlan: DEFAULT_ROUTINE.flatMap(planDay => planDay.blocks.flatMap(block => block.movements))
+  };
+  for (const [source, exercises] of Object.entries(sources)) {
+    const coverage = exerciseCoverage[source] = { total: exercises.length, comparable: 0, nonLoad: 0, assistance: 0, special: 0 };
+    for (const exercise of exercises) {
+      const sample = structuredClone(exercise);
+      const target = repTarget(sample);
+      const category = sample.kind !== 'weight' ? 'nonLoad' : assisted(sample) ? 'assistance' : target ? 'comparable' : 'special';
+      coverage[category]++;
+      const eligible = category === 'comparable';
+      const sampleReps = target?.max || 10;
+      const makeSample = (id, load, daysAgo) => {
+        const startedAt = now - daysAgo * 86400000 - 60000;
+        return { id: `${source}-${sample.id}-${id}`, dayId: 'matrix-day', startedAt, finishedAt: startedAt + 30000,
+          routineSnapshot: { id: 'matrix-day', blocks: [{ id: 'matrix-block', sets: 1, movements: [structuredClone(sample)] }] },
+          entries: { [sample.id]: [sample.kind === 'weight' ? String(load) : true], _training: { version: 1,
+            choices: { [sample.id]: { ...choice } },
+            sets: { [sample.id]: [{ ...choice, load, reps: sampleReps, repsSource: 'plan', rir: null }] } } } };
+      };
+      const previous = makeSample('previous', 20, 7);
+      const current = makeSample('current', 25, 0);
+      const unchanged = JSON.stringify([previous, current]);
+      const description = `${source}: ${sample.name}`;
+      assert(personalBestForSet(current, sample, 0, [previous], dayFor) === (eligible ? 20 : null), `PR reference respects current policy for ${description}`);
+      const records = sessionPersonalRecords(current, [previous]);
+      assert(records.length === (eligible ? 1 : 0), `Workout summary matches set PR for ${description}`);
+      if (eligible) assert(records[0].load === 25 && records[0].previous === 20 && records[0].reps === sampleReps, `Summary preserves PR evidence for ${description}`);
+      assert(sessionPersonalRecords(makeSample('tie', 20, 0), [previous]).length === 0, `Ties do not create PR for ${description}`);
+      assert(sessionPersonalRecords(makeSample('lower', 15, 0), [previous]).length === 0, `Lower weights do not create PR for ${description}`);
+      assert(personalBestForSet(current, sample, 0, [], dayFor) === null, `First reference is not a PR for ${description}`);
+      const renamed = structuredClone(current);
+      const renamedMovement = renamed.routineSnapshot.blocks[0].movements[0];
+      renamedMovement.id = `${sample.id}-reimported`;
+      for (const recordsById of [renamed.entries, renamed.entries._training.choices, renamed.entries._training.sets]) {
+        recordsById[renamedMovement.id] = recordsById[sample.id];
+        delete recordsById[sample.id];
+      }
+      assert(personalBestForSet(renamed, renamedMovement, 0, [previous], dayFor) === (eligible ? 20 : null), `Reimported ID keeps the correct reference for ${description}`);
+      for (const change of [
+        record => { record.unit = 'lb'; },
+        record => { record.label = 'Different equipment'; },
+        record => { record.variant = 'alternative'; },
+        record => { record.reps = sampleReps === 1 ? 2 : sampleReps - 1; },
+        record => { record.load = 999; },
+        record => { delete record.reps; }
+      ]) {
+        const changed = structuredClone(previous);
+        change(changed.entries._training.sets[sample.id][0]);
+        assert(personalBestForSet(current, sample, 0, [changed], dayFor) === null, `Different or incomplete context cannot create PR for ${description}`);
+      }
+      assert(JSON.stringify([previous, current]) === unchanged, `PR audit does not mutate data for ${description}`);
+    }
+  }
+  return { checks, result: 'PASS', exerciseCoverage };
 }

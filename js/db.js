@@ -1,6 +1,8 @@
 import { backupActiveRoutines } from './backup.js';
 import { trainingPreferences, validateTrainingPreferences } from './training-preferences.js';
 import { validatePersonalProfile } from './profile.js';
+import { exerciseRatingKey, validateExerciseRatings } from './exercise-ratings.js';
+import { autoFinishSession } from './session-history.js';
 
 // El identificador se mantiene desde la primera versión: cambiarlo borraría los datos guardados.
 const DB_NAME = 'gymtrack';
@@ -78,6 +80,33 @@ async function softDeleteAll(store) {
 }
 
 export const db = {
+  updateExerciseRating: async (exercise, rating, expectedRating = null) => {
+    const key = exerciseRatingKey(exercise);
+    validateExerciseRatings({ [key]: rating === null ? 1 : rating });
+    const connection = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = connection.transaction(STORE_META, 'readwrite');
+      const store = transaction.objectStore(STORE_META);
+      let failure, result;
+      transaction.oncomplete = () => resolve(result);
+      transaction.onabort = () => reject(failure || transaction.error || new Error('No se pudo guardar la calificacion.'));
+      transaction.onerror = () => { failure ||= transaction.error; };
+      const request = store.get('exerciseRatings');
+      request.onsuccess = () => {
+        try {
+          result = validateExerciseRatings(request.result?.value);
+          if ((result[key] ?? null) !== expectedRating) throw new Error('La calificacion cambio en otra ventana. Vuelve a abrir la lista.');
+          if (rating === null) delete result[key];
+          else result[key] = rating;
+          store.put({ key: 'exerciseRatings', value: result });
+        } catch (error) {
+          failure = error;
+          transaction.abort();
+        }
+      };
+    });
+  },
+
   savePersonalProfile: async (profile, { routineId, expectedRoutine, expectedProfile }) => {
     const updated = validatePersonalProfile(profile);
     const connection = await openDB();
@@ -177,9 +206,10 @@ export const db = {
     });
   },
 
-  restoreBackup: async ({ sessions = [], measures = [], routines = [], exercises = [], preferences, personalProfile }, { activeRoutineId = null, expectedRoutines, expectedState } = {}) => {
+  restoreBackup: async ({ sessions = [], measures = [], routines = [], exercises = [], preferences, personalProfile, exerciseRatings }, { activeRoutineId = null, expectedRoutines, expectedState } = {}) => {
     if (preferences !== undefined) validateTrainingPreferences(preferences);
     if (personalProfile !== undefined) validatePersonalProfile(personalProfile);
+    if (exerciseRatings !== undefined) validateExerciseRatings(exerciseRatings);
     const connection = await openDB();
     return new Promise((resolve, reject) => {
       const transaction = connection.transaction([STORE_SESSIONS, STORE_MEASURES, STORE_ROUTINES, STORE_EXERCISES, STORE_META], 'readwrite');
@@ -191,11 +221,12 @@ export const db = {
       const library = transaction.objectStore(STORE_ROUTINES).getAll();
       const currentPreferences = transaction.objectStore(STORE_META).get('trainingPreferences');
       const currentProfile = transaction.objectStore(STORE_META).get('personalProfile');
+      const currentRatings = transaction.objectStore(STORE_META).get('exerciseRatings');
       const currentMeasures = transaction.objectStore(STORE_MEASURES).getAll();
       const currentExercises = transaction.objectStore(STORE_EXERCISES).getAll();
       let loaded = 0;
       const commit = () => {
-        if (++loaded !== 6) return;
+        if (++loaded !== 7) return;
         try {
           if (existing.result.some(session => !session.finishedAt && !session.deletedAt)) {
             throw new Error('Termina la sesion de entrenamiento antes de importar un respaldo.');
@@ -207,7 +238,8 @@ export const db = {
               JSON.stringify(currentMeasures.result) !== JSON.stringify(expectedState.measures) ||
               JSON.stringify(currentExercises.result) !== JSON.stringify(expectedState.exercises) ||
               JSON.stringify(currentPreferences.result?.value) !== JSON.stringify(expectedState.preferences) ||
-              JSON.stringify(currentProfile.result?.value) !== JSON.stringify(expectedState.personalProfile))) {
+              JSON.stringify(currentProfile.result?.value) !== JSON.stringify(expectedState.personalProfile) ||
+              JSON.stringify(currentRatings.result?.value) !== JSON.stringify(expectedState.exerciseRatings))) {
             throw new Error('Los datos locales cambiaron mientras revisabas el respaldo. Vuelve a importarlo; no se sobrescribió nada.');
           }
           const candidates = backupActiveRoutines(library.result, routines);
@@ -237,16 +269,60 @@ export const db = {
               value: trainingPreferences({ ...currentPreferences.result?.value, ...preferences }) });
           }
           if (personalProfile !== undefined) transaction.objectStore(STORE_META).put({ key: 'personalProfile', value: validatePersonalProfile(personalProfile) });
+          if (exerciseRatings !== undefined) transaction.objectStore(STORE_META).put({ key: 'exerciseRatings',
+            value: validateExerciseRatings({ ...currentRatings.result?.value, ...exerciseRatings }) });
         } catch (error) {
           failure = error;
           transaction.abort();
         }
       };
-      existing.onsuccess = library.onsuccess = currentPreferences.onsuccess = currentProfile.onsuccess = currentMeasures.onsuccess = currentExercises.onsuccess = commit;
+      existing.onsuccess = library.onsuccess = currentPreferences.onsuccess = currentProfile.onsuccess = currentRatings.onsuccess = currentMeasures.onsuccess = currentExercises.onsuccess = commit;
     });
   },
 
-  putSession: (s) => tx(STORE_SESSIONS, 'readwrite', st => st.put(stamp(s))),
+  autoFinishSession: async (id, now = Date.now()) => {
+    const connection = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = connection.transaction(STORE_SESSIONS, 'readwrite');
+      const store = transaction.objectStore(STORE_SESSIONS);
+      let result, failure;
+      transaction.oncomplete = () => resolve(result);
+      transaction.onabort = () => reject(failure || transaction.error || new Error('No se pudo cerrar la sesion.'));
+      transaction.onerror = () => { failure ||= transaction.error; };
+      const request = store.get(id);
+      request.onsuccess = () => {
+        try {
+          const current = request.result;
+          const closed = autoFinishSession(current, now);
+          result = closed ? stamp(closed) : current;
+          if (closed) store.put(result);
+        } catch (error) { failure = error; transaction.abort(); }
+      };
+    });
+  },
+  putSession: async session => {
+    const connection = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = connection.transaction(STORE_SESSIONS, 'readwrite');
+      const store = transaction.objectStore(STORE_SESSIONS);
+      let failure;
+      transaction.oncomplete = () => resolve(session.id);
+      transaction.onabort = () => reject(failure || transaction.error || new Error('No se pudo guardar el entrenamiento.'));
+      transaction.onerror = () => { failure ||= transaction.error; };
+      const request = store.get(session.id);
+      request.onsuccess = () => {
+        try {
+          const closedAt = request.result?.entries?._autoFinish?.closedAt;
+          if (closedAt && (!session.finishedAt || session.entries?._autoFinish?.closedAt !== closedAt)) {
+            const error = new Error('Esta sesion ya se cerro automaticamente. Revisa el registro guardado antes de editar.');
+            error.name = 'SessionConflictError';
+            throw error;
+          }
+          store.put(stamp(session));
+        } catch (error) { failure = error; transaction.abort(); }
+      };
+    });
+  },
   putSessionRaw: (s) => tx(STORE_SESSIONS, 'readwrite', st => st.put(s)),
   getSession: (id) => tx(STORE_SESSIONS, 'readonly', st => st.get(id)),
   deleteSession: (id) => softDelete(STORE_SESSIONS, id),

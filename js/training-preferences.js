@@ -1,4 +1,8 @@
-export const DEFAULT_TRAINING_PREFERENCES = Object.freeze({ restSeconds: 45, keepScreenAwake: false });
+export const DEFAULT_TRAINING_PREFERENCES = Object.freeze({ restSeconds: 45, keepScreenAwake: false, muscleSuggestions: false, autoFinishMinutes: 120 });
+
+export function validAutoFinishMinutes(value) {
+  return Number.isInteger(value) && (value === 0 || (value >= 15 && value <= 360));
+}
 
 export function validateTrainingPreferences(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Las preferencias de entrenamiento no son válidas.');
@@ -10,6 +14,12 @@ export function validateTrainingPreferences(value) {
   }
   if (Object.hasOwn(value, 'keepScreenAwake') && typeof value.keepScreenAwake !== 'boolean') {
     throw new Error('La preferencia de pantalla no es válida.');
+  }
+  if (Object.hasOwn(value, 'muscleSuggestions') && typeof value.muscleSuggestions !== 'boolean') {
+    throw new Error('La preferencia de sugerencias no es válida.');
+  }
+  if (Object.hasOwn(value, 'autoFinishMinutes') && !validAutoFinishMinutes(value.autoFinishMinutes)) {
+    throw new Error('Elige Desactivado o un cierre entre 15 y 360 minutos, sin decimales.');
   }
   return { ...value };
 }

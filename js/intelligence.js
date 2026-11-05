@@ -119,10 +119,16 @@ export function nextSetAdvice(session, movement, index, sessions, dayFor) {
   const choice = equipmentChoice(session, movement);
   const key = comparisonKey(movement, choice);
   const prior = trackedSets(sessions.filter(item => item.id !== session.id && item.startedAt < session.startedAt), dayFor).filter(row => row.key === key).sort((first, second) => second.session.startedAt - first.session.startedAt || second.index - first.index);
-  const current = (session.entries?._training?.sets?.[movement.id] || []).slice(0, index).map((_, offset) => setRecord(session, movement.id, offset)).filter(record => record && (Number.isInteger(record.reps) || record.discomfort) && comparisonKey(movement, record) === key);
+  const current = (session.entries?._training?.sets?.[movement.id] || []).slice(0, index).map((_, offset) => {
+    const record = setRecord(session, movement.id, offset);
+    return record ? { ...record, index: offset } : null;
+  }).filter(record => record && (Number.isInteger(record.reps) || record.discomfort) && comparisonKey(movement, record) === key);
   const last = current.at(-1) || prior[0];
+  if (last?.discomfort) return { code: 'discomfort', text: 'Detén este ejercicio si hay dolor', reason: 'Sin recomendaciones de carga tras registrar molestia.' };
+  if (/\b(?:peso\s+(?:minimo|ligero|no\s+exigente)|sin\s+peso)\b/.test(normalizeExercise(`${movement.name} ${movement.note || ''}`))) {
+    return { code: 'coach-load', text: 'Carga indicada por tu coach', reason: 'Este plan limita la carga; no proponemos aumentarla automáticamente.' };
+  }
   if (!last) return { text: 'Primera referencia', reason: 'Elige una carga cómoda para este equipo; no copiamos cargas de otras máquinas.' };
-  if (last.discomfort) return { code: 'discomfort', text: 'Detén este ejercicio si hay dolor', reason: 'Sin recomendaciones de carga tras registrar molestia.' };
   if (last.reps < target.min || last.rir === 0) return {
     direction: 'decrease', text: assisted(movement) ? 'Considera más asistencia' : 'Considera bajar la carga',
     reason: 'La última serie quedó por debajo de las reps previstas o sin margen. Prioriza la técnica.'
@@ -135,17 +141,19 @@ export function nextSetAdvice(session, movement, index, sessions, dayFor) {
     .filter(item => item.block)
     .sort((first, second) => second.session.startedAt - first.session.startedAt)
     .slice(0, 3);
+  const reference = recent[0];
+  const referenceLoads = reference ? Array.from({ length: reference.block.sets }, (_, setIndex) => setRecord(reference.session, reference.movement.id, setIndex)?.load) : [];
   const consistent = recent.length === 3 && new Set(recent.map(item => localDay(item.session.startedAt))).size === 3 &&
     session.startedAt - recent[0].session.startedAt <= 14 * 86400000 &&
     recent.every(item => item.block.sets === recent[0].block.sets && Array.from({ length: item.block.sets }, (_, setIndex) => {
       const record = setRecord(item.session, item.movement.id, setIndex);
-      return record && comparisonKey(item.movement, record) === key && !record.discomfort && record.rir !== 0 &&
-        Number.isInteger(record.reps) && record.reps >= target.max && record.load === last.load;
+      return isComparableSetRecord(record) && comparisonKey(item.movement, record) === key && !record.discomfort && record.rir !== 0 &&
+        record.reps >= target.max && record.load === referenceLoads[setIndex];
     }).every(Boolean));
   const currentBlock = dayFor(session)?.blocks.find(block => block.movements.some(item => item.id === movement.id));
-  if (consistent && currentBlock?.sets === recent[0].block.sets && !current.some(record => record.discomfort || record.load !== last.load || record.reps < target.max || record.rir === 0)) return {
+  if (consistent && currentBlock?.sets === recent[0].block.sets && !current.some(record => record.discomfort || record.load !== referenceLoads[record.index] || record.reps < target.max || record.rir === 0)) return {
     direction: 'increase', text: assisted(movement) ? 'Considera menos asistencia' : 'Considera subir la carga',
-    reason: 'Tres sesiones completas con la misma carga. Si mantuviste buena técnica, prueba un paso pequeño. Las reps precargadas no miden esfuerzo.'
+    reason: 'Tres sesiones completas con las mismas cargas por serie. Si mantuviste buena técnica, prueba un paso pequeño. Las reps precargadas no miden esfuerzo.'
   };
   return { direction: 'maintain', text: 'Mantén la carga', reason: 'Conserva tu referencia mientras reúnes más sesiones consistentes. Comprueba el equipo y la unidad antes de usar el peso anterior.' };
 }
@@ -204,6 +212,34 @@ export function periodBounds(mode, anchor = Date.now()) {
   if (mode === 'month') end.setMonth(end.getMonth() + 1);
   else end.setDate(end.getDate() + (mode === 'week' ? 7 : 1));
   return { start: start.getTime(), end: end.getTime() };
+}
+
+export function trainingCoverage(routine, sessions, now = Date.now()) {
+  const start = now - 28 * 86400000;
+  const groups = new Map();
+  let unclassifiedSets = 0, missingSnapshots = 0;
+  const accumulate = (day, session = null) => {
+    for (const block of day.blocks || []) for (const movement of block.movements || []) {
+      if (exerciseGroups(movement).includes('cardio')) continue;
+      const count = session ? (session.entries?.[movement.id] || []).slice(0, block.sets).filter(isRecorded).length : block.sets;
+      const contributions = muscleContributions(movement);
+      if (!contributions.length) { if (session) unclassifiedSets += count; continue; }
+      for (const { group, share } of contributions) {
+        const totals = groups.get(group) || { group, plannedDirect: 0, plannedSecondary: 0, recordedDirect: 0, recordedSecondary: 0, latest: 0 };
+        totals[`${session ? 'recorded' : 'planned'}${share === 1 ? 'Direct' : 'Secondary'}`] += count;
+        if (session && count) totals.latest = Math.max(totals.latest, session.startedAt);
+        groups.set(group, totals);
+      }
+    }
+  };
+  routine.forEach(day => accumulate(day));
+  for (const session of sessions) {
+    if (session.deletedAt || !session.finishedAt || !Number.isFinite(session.startedAt) || session.startedAt < start || session.startedAt > now) continue;
+    if (!session.routineSnapshot) { missingSnapshots++; continue; }
+    accumulate(session.routineSnapshot, session);
+  }
+  return { groups: [...groups.values()], start, end: now, unclassifiedSets, missingSnapshots,
+    openSessions: sessions.filter(session => !session.deletedAt && !session.finishedAt && session.startedAt <= now).length };
 }
 
 export function periodSummary(sessions, dayFor, bounds, cycleId = null) {

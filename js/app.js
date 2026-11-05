@@ -11,13 +11,14 @@ import { EMPTY_PROFILE, normalizeProfile, validProfileDate, monthlyInBody, valid
 import { sessionDuration, trainingAchievements } from './progress.js';
 import { enterView, resizeContent, disclose, bindDisclosures } from './motion.js';
 import { createTrainingUI } from './training-ui.js';
-import { equipmentChoice, setRecord, comparisonKey, personalBestForSet, normalizeExercise } from './intelligence.js';
-import { correctSessionWeight, movementLoadHistory, movementHistoryRows } from './session-history.js';
-import { trainingPreferences, createScreenWakeLock } from './training-preferences.js';
+import { equipmentChoice, setRecord, comparisonKey, personalBestForSet, normalizeExercise, trainingCoverage } from './intelligence.js';
+import { autoFinishSession, bodyWeightReference, correctSessionWeight, movementLoadHistory, movementHistoryRows } from './session-history.js';
+import { trainingPreferences, createScreenWakeLock, validAutoFinishMinutes } from './training-preferences.js';
 import { sessionPersonalRecords } from './personal-records.js';
-import { generateRoutine } from './routine-generator.js';
+import { generateRoutine, conditioningChoices } from './routine-generator.js';
+import { exerciseRatingKey, exerciseRating, validateExerciseRatings } from './exercise-ratings.js';
 
-const APP_VERSION = '2.9.3';
+const APP_VERSION = '2.9.12';
 
 /* ============================== Estado ============================== */
 
@@ -30,6 +31,7 @@ const state = {
   routineConflict: false,
   activeRoutineId: null,
   exercises: [],
+  exerciseRatings: {},
   profile: normalizeProfile(),
   personalProfile: undefined,
   session: null,              // sesión activa (finishedAt === null)
@@ -51,6 +53,8 @@ const state = {
   viewScroll: {},
   restSeconds: 45,
   keepScreenAwake: false,
+  muscleSuggestions: false,
+  autoFinishMinutes: 120,
   wakeLockStatus: 'inactive',
   sessionSaveStatus: 'saved',
   multimediaAudio: false,
@@ -232,6 +236,7 @@ function newSession(dayId) {
   const day = dayById(dayId);
   const entries = {};
   entries._cycle = { id: day.cycleId || 'legacy', name: day.cycleName || 'Historial sin ciclo' };
+  if (state.autoFinishMinutes > 0) entries._autoFinish = { version: 1, limitMinutes: state.autoFinishMinutes };
   for (const block of day.blocks) {
     for (const mv of block.movements) {
       entries[mv.id] = Array.from({ length: block.sets }, () => (mv.kind === 'weight' ? '' : false));
@@ -311,6 +316,94 @@ function updateSaveStatus() {
   const summary = $('#summary-save-status');
   if (summary) summary.textContent = cloud.syncing ? 'Guardado aquí · sincronizando registros…' :
     cloud.error ? 'Guardado aquí · revisa la sincronización en Ajustes.' : 'Guardado en este dispositivo.';
+}
+
+let autoFinishTimer = null, autoFinishBusy = false;
+const seenAutoFinishReviews = new Set();
+
+function pendingAutoFinishReviews() {
+  return state.sessions.filter(session => !session.deletedAt && session.finishedAt && session.entries?._autoFinish?.closedAt && !session.entries._autoFinish.reviewedAt)
+    .sort((first, second) => first.finishedAt - second.finishedAt);
+}
+
+function scheduleAutoFinish() {
+  clearTimeout(autoFinishTimer);
+  const minutes = state.session?.entries?._autoFinish?.limitMinutes;
+  if (!state.session || state.session.finishedAt || !validAutoFinishMinutes(minutes) || minutes === 0) return;
+  const remaining = state.session.startedAt + minutes * 60000 - Date.now();
+  autoFinishTimer = setTimeout(() => processAutoFinish(), remaining > 0 ? remaining : 30000);
+}
+
+async function acceptAutoFinish(id) {
+  const restoreControls = freezeControls($$('#sheet button, #sheet input, #sheet textarea'));
+  sheetBusy = true;
+  try {
+    const current = await db.getSession(id);
+    if (!current?.entries?._autoFinish?.closedAt || current.deletedAt) throw new Error('El registro ya no está disponible.');
+    const saved = await db.updateSession(current, record => ({ ...record, entries: { ...record.entries,
+      _autoFinish: { ...record.entries._autoFinish, reviewedAt: Date.now() } } }));
+    state.sessions = state.sessions.map(session => session.id === id ? saved : session);
+    sheetBusy = false;
+    closeSheet(); renderHome(); renderHistory();
+    sync.syncQuietly();
+  } catch (error) {
+    toast(error.message || 'No se pudo confirmar. La revisión sigue pendiente.');
+  } finally { sheetBusy = false; restoreControls(); }
+}
+
+function showAutoFinishReview(session) {
+  if (!session) return;
+  seenAutoFinishReviews.add(session.id);
+  const progress = sessionProgress(session);
+  openSheet(`<span class="eyebrow">Cierre automático</span><h2>Sesión cerrada automáticamente</h2><p>${esc(sessionDay(session)?.title || 'Tu entrenamiento')} · ${fmtDate(session.startedAt)}</p>
+    <p id="auto-finish-status" data-limit-minutes="${session.entries._autoFinish.limitMinutes}">Límite elegido: ${fmtDuration(session.entries._autoFinish.limitMinutes * 60000)}.</p>
+    <p>Guardamos ${progress.done} de ${progress.total} series tal como estaban. Las pendientes no se marcaron como hechas.</p><p>¿Quieres revisar lo registrado o dejarlo así?</p>
+    <div class="sheet-form-actions"><button class="btn btn-primary" id="auto-finish-review">Revisar sesión</button><button class="btn btn-ghost" id="auto-finish-keep">Dejar así</button></div>`);
+  $('#auto-finish-review').onclick = () => showSessionDetail(session.id);
+  $('#auto-finish-keep').onclick = () => acceptAutoFinish(session.id);
+}
+
+function maybeShowAutoFinishReview() {
+  if (document.visibilityState !== 'visible' || state.session || state.draft || sheetBusy || $('#sheet-backdrop').classList.contains('show')) return;
+  showAutoFinishReview(pendingAutoFinishReviews().find(session => !seenAutoFinishReviews.has(session.id)));
+}
+
+async function processAutoFinish() {
+  if (autoFinishBusy || state.startingSession || discardingSessionId) return;
+  const editing = $('#sheet-backdrop.show')?.querySelector('form, textarea, select, input:not([type="range"]):not([type="search"])');
+  if (state.draft || sheetBusy || editing) { scheduleAutoFinish(); return; }
+  const sessions = new Map(state.sessions.map(session => [session.id, session]));
+  if (state.session) sessions.set(state.session.id, state.session);
+  const due = [...sessions.values()].filter(session => autoFinishSession(session));
+  if (!due.length) { scheduleAutoFinish(); maybeShowAutoFinishReview(); return; }
+  autoFinishBusy = true;
+  const liveDue = due.some(session => session.id === state.session?.id);
+  if (liveDue && document.activeElement?.closest('#view-workout')) document.activeElement.blur();
+  const restoreControls = liveDue ? freezeControls($$('#view-workout button, #view-workout input, #view-workout textarea')) : () => {};
+  let closed = false;
+  try {
+    if (liveDue && state.sessionSaveStatus !== 'saved') await saveSession(true);
+    else await saveQueue;
+    for (const session of due) {
+      const saved = await db.autoFinishSession(session.id);
+      if (!saved?.finishedAt || saved.deletedAt) continue;
+      state.sessions = state.sessions.map(item => item.id === saved.id ? saved : item);
+      if (state.session?.id === saved.id) { hideRest(); state.session = null; }
+      closed = true;
+    }
+    if (closed) {
+      if (state.view === 'workout' && !state.session) setView('home');
+      renderHome(); renderHistory(); screenWakeLock.update();
+      sync.syncQuietly();
+    }
+  } catch (error) {
+    console.error('No se pudo cerrar automáticamente.', error);
+    state.sessionSaveStatus = 'error'; updateSaveStatus();
+    toast('No se pudo cerrar automáticamente. Tus cambios siguen en pantalla; vuelve a intentar guardar.');
+  } finally {
+    autoFinishBusy = false; restoreControls(); scheduleAutoFinish();
+  }
+  if (closed) maybeShowAutoFinishReview();
 }
 
 function saveSession(immediate = false) {
@@ -435,7 +528,9 @@ function renderHome() {
       </button>` : '';
     if (day) $('#btn-resume').onclick = () => openWorkout(state.session.dayId);
   } else {
-    slot.innerHTML = '';
+    const pending = pendingAutoFinishReviews();
+    slot.innerHTML = pending.length ? `<button class="resume-banner" id="btn-review-auto-finish" style="width:100%;text-align:left"><div><strong>Sesión cerrada automáticamente</strong><small>${pending.length > 1 ? `${pending.length} registros por revisar` : 'Revisar o dejar así'}</small></div></button>` : '';
+    if (pending.length) $('#btn-review-auto-finish').onclick = () => showAutoFinishReview(pending[0]);
   }
 
   const nextDayId = suggestNextDay(finished);
@@ -539,7 +634,7 @@ function calcWeekStreak(finished) {
 /* ---------- Entreno ---------- */
 
 async function startOrOpen(dayId) {
-  if (state.startingSession) return;
+  if (state.startingSession || autoFinishBusy) return;
   state.startingSession = true;
   try {
   if (state.session && state.session.dayId !== dayId) {
@@ -560,6 +655,7 @@ async function startOrOpen(dayId) {
     await saveSession(true);
   }
   openWorkout(dayId);
+  scheduleAutoFinish();
   } catch (error) {
     toast(error.message || 'No se pudo abrir el entrenamiento');
   } finally {
@@ -596,10 +692,13 @@ function renderBlocks(day) {
           const ph = last?.values[i] ?? last?.values.find(value => value !== null) ?? '–';
           const best = personalBestForSet(s, mv, i, state.sessions, sessionDay);
           const isPr = best !== null && parseFloat(v) > best;
-          return `<div class="set${v ? ' filled' : ''}${isPr ? ' pr' : ''}" data-mid="${mv.id}" data-idx="${i}" data-best="${best ?? ''}">
+            const unit = setRecord(s, mv.id, i)?.unit || equipmentChoice(s, mv).unit;
+            const knownUnit = ['kg', 'lb'].includes(unit);
+            return `<div class="set${v ? ' filled' : ''}${isPr ? ' pr' : ''}" data-mid="${mv.id}" data-idx="${i}" data-best="${best ?? ''}"${knownUnit ? ` data-weight-unit="${unit}"` : ''}>
               <span class="n">${i + 1}</span>
               ${trainingUI.repsInput(s, mv, i)}
-              <input inputmode="decimal" enterkeyhint="done" autocomplete="off" value="${esc(v)}" placeholder="${esc(ph)}" aria-label="Serie ${i + 1} peso" />
+              <input inputmode="decimal" enterkeyhint="done" autocomplete="off" value="${esc(v)}" placeholder="${esc(ph)}" aria-label="Serie ${i + 1} peso${knownUnit ? ` en ${unit}` : ''}" />
+              ${knownUnit ? `<span class="set-load-unit" aria-hidden="true">${unit}</span>` : ''}
             </div>`;
         }
         const on = vals[i] === true;
@@ -1088,6 +1187,7 @@ function showSessionDetail(id) {
     <span class="eyebrow">Tu historial</span>
     <h2>${esc(day?.title || 'Entrenamiento anterior')}</h2>
     <p>${fmtDate(s.startedAt)} · ${fmtDuration(sessionDuration(s))}</p>
+    ${s.entries?._autoFinish?.closedAt ? `<p class="training-caption">Cierre automático tras ${fmtDuration(s.entries._autoFinish.limitMinutes * 60000)}${s.entries._autoFinish.reviewedAt ? ' · Revisado' : ' · Pendiente de revisión'}</p>${!s.entries._autoFinish.reviewedAt ? '<button class="btn btn-ghost" id="auto-finish-confirm">Dejar así</button>' : ''}` : ''}
     <div class="session-actions"><button class="btn btn-ghost duration-edit" id="edit-duration">Editar duración</button>
     <button class="btn btn-ghost" id="session-day-report">Balance del día</button></div>
     ${!s.routineSnapshot ? '<p class="session-legacy">Esta sesión no conserva una copia original de su rutina. Los datos disponibles pueden no reflejar el plan de ese día.</p>' : ''}
@@ -1104,6 +1204,7 @@ function showSessionDetail(id) {
   `);
 
   $('#sheet-close').onclick = closeSheet;
+  if ($('#auto-finish-confirm')) $('#auto-finish-confirm').onclick = () => acceptAutoFinish(id);
   $('#edit-duration').onclick = () => openDurationEditor(s, () => showSessionDetail(id));
   $('#session-day-report').onclick = () => trainingUI.openProgress('day', s.startedAt);
   bindRecordLinks();
@@ -1210,7 +1311,7 @@ function openWorkoutMenu() {
   openSheet(`<span class="eyebrow">Tu entrenamiento</span><h2>A mano, sin estorbar</h2><div class="list-card">
     <button class="list-row" id="workout-notes"><span class="lr-body"><strong>Nota del entrenamiento</strong><small>${state.session?.notes ? 'Tienes una nota guardada' : 'Sensaciones o detalles que quieras recordar'}</small></span><span aria-hidden="true">›</span></button>
     <button class="list-row" id="workout-rest"><span class="lr-body"><strong>Iniciar descanso</strong><small>${state.restSeconds} segundos</small></span><span aria-hidden="true">›</span></button>
-    <button class="list-row" id="workout-preferences"><span class="lr-body"><strong>Descanso y pantalla</strong><small>Preferencias, sin cambiar las series del coach</small></span><span aria-hidden="true">›</span></button>
+    <button class="list-row" id="workout-preferences"><span class="lr-body"><strong>Preferencias de entrenamiento</strong><small>Sin cambiar las series del coach</small></span><span aria-hidden="true">›</span></button>
     <button class="list-row" id="workout-balance"><span class="lr-body"><strong>Balance de la semana</strong><small>Sesiones finalizadas y registros comparables</small></span><span aria-hidden="true">›</span></button></div>`);
   $('#workout-notes').onclick = openNotes;
   $('#workout-rest').onclick = () => { closeSheet(); startRest(state.restSeconds); };
@@ -1268,6 +1369,12 @@ function openExerciseProgress() {
   render();
 }
 
+function loadGroupLabel(group) {
+  return [group.record.label === 'Habitual' ? 'Tu equipo' : group.record.label,
+    group.record.variant === 'alternative' ? 'Alternativo' : null, `${group.record.reps} reps`,
+    group.record.unit === 'escala' ? null : group.record.unit, `Plan ${group.prescription}`, group.note].filter(Boolean).join(' · ');
+}
+
 function loadTrendHtml(group) {
   const { points, record } = group;
   const first = points[0], last = points.at(-1);
@@ -1282,15 +1389,66 @@ function loadTrendHtml(group) {
   const unit = record.unit === 'escala' ? '' : ` ${esc(record.unit)}`;
   return `<div class="load-trend-card">
     <div class="load-trend-heading"><span class="eyebrow">Carga registrada · ${record.reps} reps</span><span>${plural(points.length, 'sesión', 'sesiones')}</span></div>
-    <div class="load-trend-value"><strong>${last.load}<small>${unit}</small></strong><span>${change === null ? points.length === 1 ? 'Primera referencia' : first.load === 0 ? 'Referencia inicial en cero' : 'No se puede calcular el porcentaje' : `${change > 0 ? '+' : ''}${change.toLocaleString('es-MX', { maximumFractionDigits: 1 })}% desde el primer registro comparable`}</span></div>
+    <div class="load-trend-value"><strong><span data-trend-load>${last.load}</span><small>${unit}</small></strong><span data-trend-change>${change === null ? points.length === 1 ? 'Primera referencia' : first.load === 0 ? 'Referencia inicial en cero' : 'No se puede calcular el porcentaje' : `${change > 0 ? '+' : ''}${Math.round(change)}% desde el primer registro comparable`}</span></div>
     <svg class="load-trend-chart" viewBox="0 0 320 152" role="img" aria-label="${esc(`Carga máxima por sesión con ${record.reps} reps. Primer registro: ${first.load}; último: ${last.load}; mejor: ${max}.`)}">
       <path class="load-trend-grid" d="M24 24H296M24 76H296M24 128H296"/>
-      <polyline class="load-trend-line" points="${line}"/>
-      ${coordinates.map((point, index) => `<circle class="${index === coordinates.length - 1 ? 'latest' : ''}" cx="${point.x}" cy="${point.y}" r="${index === coordinates.length - 1 ? 5 : 3}"/>`).join('')}
+      <polyline class="load-trend-line" pathLength="1" points="${line}"/>
+      <line class="load-trend-cursor" x1="${coordinates.at(-1).x}" x2="${coordinates.at(-1).x}" y1="16" y2="136"/>
+      ${coordinates.map((point, index) => `<circle data-trend-point="${index}" class="${index === coordinates.length - 1 ? 'latest selected' : ''}" cx="${point.x}" cy="${point.y}" r="${index === coordinates.length - 1 ? 5 : 3}"/>`).join('')}
     </svg>
     <div class="load-trend-dates"><span>${fmtDate(first.at, { day: 'numeric', month: 'short', year: 'numeric' })}</span>${points.length > 1 ? `<span>${fmtDate(last.at, { day: 'numeric', month: 'short', year: 'numeric' })}</span>` : ''}</div>
+    <input class="load-trend-scrubber" type="range" min="0" max="${points.length - 1}" step="1" value="${points.length - 1}" aria-label="Registro de carga" ${points.length < 2 ? 'disabled' : ''}>
+    <div class="load-trend-selection"><time data-trend-date>${fmtDate(last.at, { day: 'numeric', month: 'short', year: 'numeric' })}</time><button type="button" class="text-action" data-trend-open>Ver sesión</button></div>
     <div class="load-trend-best"><span>Mejor registro comparable</span><b>${max}${unit} × ${record.reps}</b></div>
-  </div><p class="training-caption">Compara números del mismo equipo y reps registradas; no mide tu nivel de fuerza. Si cambias de máquina o de escala sin registrarlo, la app no puede distinguirlo. Las reps del plan no demuestran esfuerzo.</p>`;
+  </div><details class="load-trend-context"><summary>Sobre estos datos</summary><p>Máximo de cada sesión con el mismo equipo y reps registradas. No es un 1RM ni un nivel de fuerza. Los cambios de equipo no registrados no se pueden distinguir; las reps del plan no demuestran esfuerzo.</p></details>`;
+}
+
+function bindLoadTrend(container, group, onSelect = null) {
+  if (!container || !group) return;
+  const slider = container.querySelector('.load-trend-scrubber');
+  const chart = container.querySelector('.load-trend-chart');
+  const markers = [...chart.querySelectorAll('[data-trend-point]')];
+  let selected = group.points.length - 1, activePointer = null;
+  const select = index => {
+    selected = Math.max(0, Math.min(group.points.length - 1, index));
+    const point = group.points[selected], marker = markers[selected];
+    const date = fmtDate(point.at, { day: 'numeric', month: 'short', year: 'numeric' });
+    container.querySelector('[data-trend-load]').textContent = point.load;
+    container.querySelector('[data-trend-date]').textContent = date;
+    const first = group.points[0];
+    const change = first.load > 0 ? Math.round((point.load - first.load) / first.load * 100) : null;
+    container.querySelector('[data-trend-change]').textContent = !selected ? 'Primera referencia' : change === null ? 'Referencia inicial en cero' : `${change > 0 ? '+' : ''}${change}% desde el primer registro comparable`;
+    slider.value = selected;
+    slider.setAttribute('aria-valuetext', `${point.load}${group.record.unit === 'escala' ? '' : ` ${group.record.unit}`} · ${group.record.reps} reps · ${date}`);
+    for (const cursor of chart.querySelectorAll('.load-trend-cursor')) {
+      cursor.setAttribute('x1', marker.getAttribute('cx'));
+      cursor.setAttribute('x2', marker.getAttribute('cx'));
+    }
+    markers.forEach((item, position) => {
+      item.classList.toggle('selected', position === selected);
+      item.setAttribute('r', position === selected ? '6' : '3');
+    });
+    onSelect?.(point, group.record);
+  };
+  const selectFromPointer = event => {
+    const screen = chart.createSVGPoint();
+    screen.x = event.clientX; screen.y = event.clientY;
+    const local = screen.matrixTransform(chart.getScreenCTM().inverse());
+    const nearest = markers.reduce((best, marker, index) => Math.abs(Number(marker.getAttribute('cx')) - local.x) <
+      Math.abs(Number(markers[best].getAttribute('cx')) - local.x) ? index : best, 0);
+    select(nearest);
+  };
+  slider.oninput = () => select(Number(slider.value));
+  chart.onpointerdown = event => {
+    if (!event.isPrimary || event.button !== 0) return;
+    activePointer = event.pointerId;
+    chart.setPointerCapture(event.pointerId);
+    selectFromPointer(event);
+  };
+  chart.onpointermove = event => { if (event.pointerId === activePointer) selectFromPointer(event); };
+  chart.onpointerup = chart.onpointercancel = () => { activePointer = null; };
+  container.querySelector('[data-trend-open]').onclick = () => showSessionDetail(group.points[selected].sessionId);
+  select(selected);
 }
 
 function openMovementHistory(movementId, sourceSessionId = null) {
@@ -1301,16 +1459,10 @@ function openMovementHistory(movementId, sourceSessionId = null) {
   const { movement } = found;
   const rows = movementHistoryRows(movement, state.sessions, Date.now(), sessionDay);
   const groups = movementLoadHistory(movement, state.sessions);
-  const groupLabel = group => [
-    group.record.label === 'Habitual' ? 'Tu equipo' : group.record.label,
-    group.record.variant === 'alternative' ? 'Alternativo' : null,
-    `${group.record.reps} reps`, group.record.unit === 'escala' ? null : group.record.unit,
-    `Plan ${group.prescription}`, group.note
-  ].filter(Boolean).join(' · ');
   openSheet(`<span class="eyebrow">Historial del ejercicio</span><h2>${esc(movement.name)}</h2>
     <p class="movement-history-count">${plural(rows.length, 'sesión', 'sesiones')}</p>
-    ${groups.length === 1 ? `<p class="training-caption">${esc(groupLabel(groups[0]))}</p>` : ''}
-    ${groups.length > 1 ? `<div class="progress-contexts" role="group" aria-label="Registros comparables">${groups.map((group, index) => `<button data-trend-group="${index}" aria-pressed="${index === 0}">${esc(groupLabel(group))}</button>`).join('')}</div>` : ''}
+    ${groups.length === 1 ? `<p class="training-caption">${esc(loadGroupLabel(groups[0]))}</p>` : ''}
+    ${groups.length > 1 ? `<div class="progress-contexts" role="group" aria-label="Registros comparables">${groups.map((group, index) => `<button data-trend-group="${index}" aria-pressed="${index === 0}">${esc(loadGroupLabel(group))}</button>`).join('')}</div>` : ''}
     <div id="movement-load-trend">${groups.length ? loadTrendHtml(groups[0]) : movement.kind === 'weight' && rows.length ? '<p class="training-caption">Tus pesos siguen abajo. La curva necesita registros con reps y contexto comparables; no adivinamos los datos antiguos ni comparamos asistencia o planes especiales.</p>' : ''}</div>
     <div class="movement-history">${rows.length ? rows.map(row => `<section class="movement-history-row">
       <header><h3>${fmtDate(row.session.startedAt, { day: 'numeric', month: 'short', year: 'numeric' })}</h3><button class="text-action" data-history-session="${esc(row.session.id)}">Ver sesión</button><span>${esc(row.movement.reps)} · ${plural(row.sets.length, 'serie', 'series')}</span></header>
@@ -1320,8 +1472,10 @@ function openMovementHistory(movementId, sourceSessionId = null) {
     button.onclick = () => {
       $$('[data-trend-group]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));
       $('#movement-load-trend').innerHTML = loadTrendHtml(groups[Number(button.dataset.trendGroup)]);
+      bindLoadTrend($('#movement-load-trend'), groups[Number(button.dataset.trendGroup)]);
     };
   });
+  bindLoadTrend($('#movement-load-trend'), groups[0]);
   $$('[data-history-session]').forEach(button => {
     button.onclick = () => showSessionDetail(button.dataset.historySession);
   });
@@ -2457,11 +2611,27 @@ const ATTRS = [
 ];
 
 function renderStrength() {
-  const exercises = recordedExerciseCatalog().filter(item => item.movement.kind === 'weight');
+  const exercises = recordedExerciseCatalog().filter(item => item.movement.kind === 'weight').map(item => ({ ...item,
+    key: JSON.stringify([normalizeExercise(item.movement.name), normalizeExercise(item.movement.note), item.movement.kind]),
+    groups: movementLoadHistory(item.movement, state.sessions) }));
+  const muscles = Object.entries(MUSCLE_GROUPS).filter(([group]) => !['none', 'cardio', 'full'].includes(group));
+  const coverage = trainingCoverage(state.routine, state.sessions);
+  const byGroup = new Map(coverage.groups.map(item => [item.group, item]));
+  let selectedRegion = state.strengthRegion || exerciseFocus(exercises.find(item => item.groups.length)?.movement || { name: '' });
+  if (!muscles.some(([group]) => group === selectedRegion)) selectedRegion = 'chest';
+  let mode = state.strengthMode || 'progress';
   const finished = state.sessions.filter(session => session.finishedAt && !session.deletedAt && session.startedAt <= Date.now()).sort((first, second) => second.startedAt - first.startedAt);
   const records = finished.slice(0, 5).flatMap(session => sessionPersonalRecords(session, state.sessions).map(record => ({ ...record, at: session.startedAt }))).slice(0, 4);
-  $('#body-sub').textContent = 'Cargas y marcas de tu propio historial';
-  $('#body-slot').innerHTML = `<div class="strength-heading"><div><span class="eyebrow">Registro personal</span><h2>Tus cargas</h2></div><span>${plural(exercises.length, 'ejercicio', 'ejercicios')}</span></div>
+  $('#body-sub').textContent = 'Tu entrenamiento, por zona';
+  $('#body-slot').innerHTML = `<div class="strength-heading"><div><span class="eyebrow">Registro personal</span><h2>Tu mapa</h2></div><span>${plural(exercises.length, 'ejercicio', 'ejercicios')}</span></div>
+    ${state.sessions.some(session => session.entries?._unitConversion?.preview) ? '<p class="strength-preview-notice" role="status">Copia de revisión · Sin cambios en tu cuenta</p>' : ''}
+    <div class="seg strength-mode" role="group" aria-label="Vista del mapa"><button data-strength-mode="progress" aria-pressed="${mode === 'progress'}" class="${mode === 'progress' ? 'on' : ''}">Progreso</button><button data-strength-mode="coverage" aria-pressed="${mode === 'coverage'}" class="${mode === 'coverage' ? 'on' : ''}">Cobertura</button></div>
+    <div class="field strength-region-field"><label for="strength-region">Zona</label><select id="strength-region">${muscles.map(([group, label]) => `<option value="${group}" ${group === selectedRegion ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
+    <section class="strength-body" aria-label="Mapa corporal"><div class="strength-atlas" id="strength-atlas">${muscleAtlas([])}</div><div class="strength-body-summary" id="strength-body-summary" aria-live="polite"></div></section>
+    <div class="strength-map-legend"><span>Selección</span><span>Con registros · 28 días</span><span>En el plan</span></div>
+    <div class="strength-map-notes">${coverage.openSessions ? `<p>${plural(coverage.openSessions, 'sesión sin cerrar', 'sesiones sin cerrar')} · No incluida en la cobertura</p>` : ''}${coverage.missingSnapshots ? `<p>${plural(coverage.missingSnapshots, 'sesión sin plan original', 'sesiones sin plan original')}</p>` : ''}${coverage.unclassifiedSets ? `<p>${coverage.unclassifiedSets} series sin grupo asignado</p>` : ''}</div>
+    <div id="strength-suggestion"></div><button class="text-action strength-preferences" id="strength-preferences">Sugerencias ${state.muscleSuggestions ? 'activadas' : 'desactivadas'}</button>
+    <section class="strength-explorer" aria-label="Evolución de cargas"><div class="field"><label for="strength-movement">Ejercicio</label><select id="strength-movement"></select></div><div id="strength-context-slot"></div><details id="strength-history-chart" class="strength-history-chart"><summary>Historial de cargas</summary><div id="strength-trend"></div></details></section>
     <section class="strength-records" aria-label="Últimas marcas personales"><h3 class="section-title">Últimas marcas</h3>${records.length ? records.map(record => `<button class="strength-pr" data-strength-session="${esc(record.sessionId)}"><span><strong>${esc(record.name)}</strong><small>${fmtDate(record.at, { day: 'numeric', month: 'short' })} · ${record.reps} reps · ${esc(record.label === 'Habitual' ? 'Tu equipo' : record.label)}</small></span><b>${record.previous} <span aria-hidden="true">→</span> ${record.load}${record.unit === 'escala' ? '' : ` <small>${esc(record.unit)}</small>`}</b></button>`).join('') : '<p class="training-caption">Sin marcas nuevas comparables en tus últimas cinco sesiones.</p>'}</section>
     <label class="progress-search strength-search"><span>Buscar ejercicio</span><input id="strength-search" type="search" placeholder="Nombre del ejercicio" value="${esc(state.strengthQuery)}" autocomplete="off"></label>
     <div class="strength-exercises" id="strength-exercises"></div>
@@ -2469,9 +2639,9 @@ function renderStrength() {
     ${trainingUI.insightsHtml()}`;
   const renderExercises = () => {
     const query = normalizeExercise(state.strengthQuery);
-    const selected = exercises.filter(item => normalizeExercise(item.movement.name).includes(query)).slice(0, query ? 30 : 5);
+    const selected = exercises.filter(item => exerciseFocus(item.movement) === selectedRegion && normalizeExercise(item.movement.name).includes(query)).slice(0, query ? 30 : 5);
     $('#strength-exercises').innerHTML = selected.length ? selected.map(item => {
-      const group = movementLoadHistory(item.movement, state.sessions)[0];
+      const group = item.groups[0];
       const latest = group?.points.at(-1);
       const best = group ? Math.max(...group.points.map(point => point.load)) : null;
       const unit = group?.record.unit && group.record.unit !== 'escala' ? ` ${esc(group.record.unit)}` : '';
@@ -2482,9 +2652,81 @@ function renderStrength() {
   };
   $('#strength-search').oninput = event => { state.strengthQuery = event.target.value; renderExercises(); };
   $('#strength-all').onclick = openExerciseProgress;
+  $('#strength-preferences').onclick = openTrainingPreferences;
+  const chooser = $('#strength-movement');
+  const renderBodyDetail = (point = null, record = null) => {
+    const item = byGroup.get(selectedRegion);
+    const title = `<span class="eyebrow">${esc(MUSCLE_GROUPS[selectedRegion])}</span>`;
+    if (mode === 'coverage') {
+      $('#strength-body-summary').innerHTML = `${title}<div class="strength-coverage-number"><b>${item?.recordedDirect || 0}</b><span>series directas<br>últimos 28 días</span></div><p>${item?.recordedSecondary || 0} secundarias</p><div class="strength-plan-count"><b>${item?.plannedDirect || 0}</b><span>directas en el plan completo</span></div><p>${item?.plannedSecondary || 0} secundarias en el plan</p>`;
+      return;
+    }
+    if (!point) {
+      $('#strength-body-summary').innerHTML = `${title}<h3>Sin referencia</h3><p>No hay cargas comparables para esta zona.</p>`;
+      return;
+    }
+    const reference = bodyWeightReference({ ...record, load: point.load }, point.at, state.measures);
+    const scale = reference ? Math.max(reference.weight, reference.loadKg, 1) : 1;
+    $('#strength-body-summary').innerHTML = `${title}<p class="strength-body-exercise">${esc(exercises[Number(chooser.value)].movement.name)}</p><div class="strength-body-load"><b>${point.load}</b><span>${record.unit === 'escala' ? 'escala del equipo' : esc(record.unit)}</span></div><p>${record.reps} reps · ${fmtDate(point.at, { day: 'numeric', month: 'short' })}</p>${reference ? `<div class="strength-body-ratio"><strong>${reference.percent}%</strong><span>de tu peso registrado</span></div><div class="strength-reference-bars" aria-label="Carga ${point.load} ${esc(record.unit)}, peso corporal ${reference.weight} kg; comparación en la misma unidad"><span style="width:${reference.loadKg / scale * 100}%"></span><span style="width:${reference.weight / scale * 100}%"></span></div><p class="strength-body-reference">Tu peso: ${reference.weight} kg<br>${fmtDate(reference.at, { day: 'numeric', month: 'short', year: 'numeric' })}${record.unit === 'lb' ? '<br>Conversión solo para esta referencia.' : ''}</p>` : '<p class="strength-body-reference">Sin referencia corporal compatible anterior.</p>'}`;
+  };
+  const renderSelected = () => {
+      const item = chooser.value === '' ? null : exercises[Number(chooser.value)];
+      if (!item) {
+        $('#strength-context-slot').innerHTML = '';
+        $('#strength-trend').innerHTML = '<p class="training-caption">Sin cargas comparables para esta zona.</p>';
+        renderBodyDetail();
+        return;
+      }
+      state.strengthSelection = item.key;
+      $('#strength-context-slot').innerHTML = item.groups.length > 1 ? `<div class="field"><label for="strength-context">Equipo y repeticiones</label><select id="strength-context">${item.groups.map((group, index) => `<option value="${index}">${esc(loadGroupLabel(group))}</option>`).join('')}</select></div>` : item.groups.length ? `<p class="strength-context">${esc(loadGroupLabel(item.groups[0]))}</p>` : '';
+      const renderTrend = () => {
+        const group = item.groups[Number($('#strength-context')?.value || 0)];
+        $('#strength-trend').innerHTML = group ? loadTrendHtml(group) : '<p class="training-caption">Sin registros de carga comparables para este ejercicio.</p>';
+        if (group) bindLoadTrend($('#strength-trend'), group, renderBodyDetail);
+        else renderBodyDetail();
+      };
+      if ($('#strength-context')) $('#strength-context').onchange = renderTrend;
+      renderTrend();
+  };
+  const renderRegion = () => {
+    state.strengthRegion = selectedRegion;
+    $('#strength-region').value = selectedRegion;
+    const available = exercises.map((item, index) => ({ item, index })).filter(({ item }) => exerciseFocus(item.movement) === selectedRegion);
+    chooser.innerHTML = available.length ? available.map(({ item, index }) => `<option value="${index}">${esc(item.movement.name)}</option>`).join('') : '<option value="">Sin ejercicios registrados</option>';
+    chooser.disabled = !available.length;
+    const previous = available.find(({ item }) => item.key === state.strengthSelection) || available.find(({ item }) => item.groups.length);
+    if (previous) chooser.value = String(previous.index);
+    $$('#strength-atlas [data-region]').forEach(region => {
+      const item = byGroup.get(region.dataset.region);
+      region.dataset.coverage = item?.recordedDirect || item?.recordedSecondary ? 'recorded' : item?.plannedDirect || item?.plannedSecondary ? 'planned' : 'none';
+      region.classList.toggle('selected', region.dataset.region === selectedRegion);
+      region.setAttribute('aria-pressed', String(region.dataset.region === selectedRegion));
+    });
+    const totals = byGroup.get(selectedRegion);
+    const suggestion = !state.routine.length ? 'Sin plan activo para revisar.' : !totals?.plannedDirect && !totals?.plannedSecondary ? 'Esta zona no aparece en el plan activo. Puedes revisarla como prioridad, si encaja con tu objetivo.' : !totals?.recordedDirect && !totals?.recordedSecondary ? 'La zona está en tu plan, pero no hay series registradas en los últimos 28 días. Revisa primero las sesiones pendientes.' : 'La zona tiene trabajo registrado. Puedes elegirla como prioridad personal, sin añadir series automáticamente.';
+    $('#strength-suggestion').innerHTML = state.muscleSuggestions ? `<section class="strength-suggestion"><span class="eyebrow">Sugerencia opcional</span><p>${suggestion}</p><button class="text-action" id="strength-prioritize">Revisar prioridad en nueva rutina</button></section>` : '';
+    if ($('#strength-prioritize')) $('#strength-prioritize').onclick = () => openRoutineGenerator({ priorityGroup: selectedRegion, focus: 'full', days: state.profile.daysPerWeek });
+    renderSelected(); renderExercises();
+  };
+  chooser.onchange = renderSelected;
+  $('#strength-region').onchange = event => { selectedRegion = event.target.value; renderRegion(); };
+  const keyboardRegions = new Set();
+  $$('#strength-atlas [data-region]').forEach(region => {
+    region.setAttribute('role', 'button'); region.setAttribute('tabindex', keyboardRegions.has(region.dataset.region) ? '-1' : '0');
+    keyboardRegions.add(region.dataset.region);
+    region.setAttribute('aria-label', MUSCLE_GROUPS[region.dataset.region]);
+    region.onclick = () => { selectedRegion = region.dataset.region; renderRegion(); };
+    region.onkeydown = event => { if (['Enter', ' '].includes(event.key)) { event.preventDefault(); region.onclick(); } };
+  });
+  $('#strength-atlas svg').setAttribute('role', 'group');
+  $$('[data-strength-mode]').forEach(button => { button.onclick = () => {
+    mode = state.strengthMode = button.dataset.strengthMode;
+    $$('[data-strength-mode]').forEach(item => { item.classList.toggle('on', item === button); item.setAttribute('aria-pressed', String(item === button)); });
+    renderSelected();
+  }; });
   $$('[data-strength-session]').forEach(button => { button.onclick = () => showSessionDetail(button.dataset.strengthSession); });
   trainingUI.bindInsights($('#body-slot'), closeSheet);
-  renderExercises();
+  renderRegion();
 }
 
 function renderConsistency() {
@@ -2857,10 +3099,10 @@ function openFunctions() {
     ['Progreso por ejercicio', 'Tus cargas a lo largo del tiempo', 'Stats tiene vistas Fuerza, Cuerpo y Constancia. En Fuerza aparecen cargas, últimas marcas, búsqueda y observaciones. Cada curva usa la mayor carga registrada por sesión con las mismas reps y contexto. El acceso de Historial se conserva. Al terminar verás los PR superados, con marca anterior y nueva; solo se muestra el mejor de cada contexto.', 'No es un nivel de fuerza ni una estimación de 1RM. No convierte kg o lb ni puede detectar cambios de máquina o escala no registrados. Una reimportación con ID nuevo conserva la referencia si la coincidencia del ejercicio y su contexto es única. Nunca se inventan metadatos antiguos.', null],
     ['Corregir pesos anteriores', 'Una serie, sin rehacer el entrenamiento', 'Abre una fecha en Historial, entra a la sesión y toca Corregir debajo del peso. Revisa el valor anterior, escribe el correcto y guarda. La fecha, las reps, las notas, el resto de las series y los datos del equipo se conservan. Los récords y la curva vuelven a calcularse desde el historial corregido.', 'Cancelar no guarda. Si otro dispositivo o ventana cambió el registro local, debes volver a abrirlo; un error conserva el valor escrito para reintentar. Guardado local no significa sincronización remota confirmada.', null],
     ['Rutina desde PDF', 'Del documento a un plan editable', 'Carga el PDF de tu coach: la app extrae los días, ejercicios, series y reps en este dispositivo. Revisa los avisos y corrige el resultado antes de guardar. Un nuevo ciclo separa el balance del plan anterior sin cambiar tus sesiones pasadas.', 'Necesita un PDF con texto; para un escaneo usa Live Text y pega el contenido. No interpreta todos los diseños ni sustituye la revisión.', 'guide-pdf.png'],
-    ['Sugerencias de carga', 'Solo cuando hay evidencia para subir', 'Muestra una propuesta de subir tras tres entrenamientos completos en días distintos, con todas las series en las reps altas del plan y la misma carga registrada. Busca en las últimas seis semanas, en el mismo ciclo, y exige un registro en las últimas dos. Mantener o bajar no produce un panel. La propuesta puede quedar visible para la próxima sesión al completar las series; las molestias conservan su advertencia.', 'No propone cifras ni cambia el peso anterior. En ejercicios asistidos una subida de dificultad significa menos asistencia. Planes especiales o referencias insuficientes se explican, sin inventar datos. Las reps precargadas no demuestran facilidad ni garantizan que debas aumentar la carga.', 'guide-load.png'],
-    ['Muscle Battery', 'La carga reciente de cada grupo muscular', 'En Tu balance, Muscle Battery reúne las series de fuerza de tus sesiones finalizadas durante los últimos 14 días. Distribuye el trabajo entre músculos principales y secundarios y reduce su peso con el tiempo. Muestra tres estados: carga reciente elevada, recuperación en curso o menor carga reciente.', 'Es una estimación, no una batería real ni permiso para volver a entrenar. No conoce tu sueño, alimentación, dolor o fatiga; sin registros suficientes no puede valorar una zona. El registro sencillo no mide esfuerzo.', null],
-    ['Lo que noté', 'Comparaciones con registros visibles', 'En Fuerza y Tu balance puedes ver una comparación reciente desde dos fechas con la misma primera serie, reps, equipo y ciclo. Se etiqueta como comparación puntual. Con seis sesiones comparables en al menos dos semanas puede mostrar carga estable o un cambio sostenido: tres anteriores frente a tres recientes, al menos un 5% y sin solapamiento. Cada observación abre sus sesiones de origen.', 'Separa unidad y origen de reps: precargadas o ajustadas. No mezcla ciclos, no analiza asistencia ni afirma que ganaste o perdiste fuerza. Las comparaciones puntuales no afectan Muscle Battery. Si faltan referencias, lo explica sin completar datos antiguos.', null],
-    ['Tu balance', 'Tu entrenamiento por día, semana, mes o ciclo', 'Reúne sesiones, tiempo registrado, series realizadas y participación muscular del periodo. También muestra las reps que ajustaste frente al plan. Si esos ajustes se repiten, puede sugerir revisar el objetivo con tu coach.', 'El cumplimiento cuenta series registradas, no mide técnica ni intensidad. Dejar las reps precargadas no activa la revisión semanal; la app no cambia el plan automáticamente.', null],
+    ['Sugerencias de carga', 'Solo cuando hay evidencia para subir', 'Muestra una propuesta tras tres entrenamientos completos en días distintos, con las reps altas del plan y el mismo patrón de cargas por serie: primera con primera, segunda con segunda. No exige que todas usen un único peso. Busca en las últimas seis semanas, en el mismo ciclo, con un registro en las últimas dos. Mantener o bajar no produce un panel; la propuesta puede quedar visible para la próxima sesión.', 'No propone cifras ni cambia tu plan. Las indicaciones de peso mínimo, ligero, no exigente o sin peso impiden una subida automática; las molestias mantienen su advertencia. Las reps precargadas no miden esfuerzo ni garantizan que debas subir. Tres sesiones es una regla prudente de la app, no una prescripción clínica individual.', 'guide-load.png'],
+    ['Muscle Battery', 'La carga reciente de cada grupo muscular', 'Su acceso está al inicio de Stats, junto a Trabajo por músculo. Reúne las series de carga de tus sesiones finalizadas durante los últimos 14 días, distribuye la participación muscular y reduce su peso con el tiempo. Puedes seleccionar una zona en el mapa o en la lista. El detalle de Tu balance se conserva.', 'Es una estimación, no una batería real ni permiso para volver a entrenar. No conoce tu sueño, alimentación, dolor o fatiga; sin registros suficientes no puede valorar una zona. No es una medición de fuerza ni de recuperación.', null],
+    ['Tendencias', 'Comparaciones con registros visibles', 'En Fuerza y Tu balance puedes ver una comparación reciente desde dos fechas con la misma primera serie, reps, equipo y ciclo. Se etiqueta como comparación puntual. Con seis sesiones comparables en al menos dos semanas puede mostrar carga estable o un cambio sostenido: tres anteriores frente a tres recientes, al menos un 5% y sin solapamiento. Cada observación abre sus sesiones de origen.', 'Separa unidad y origen de reps: precargadas o ajustadas. No mezcla ciclos, no analiza asistencia ni afirma que ganaste o perdiste fuerza. Las comparaciones puntuales no afectan Muscle Battery. Si faltan referencias, lo explica sin completar datos antiguos.', null],
+    ['Tu balance', 'Tu entrenamiento por día, semana, mes o ciclo', 'Reúne sesiones, tiempo registrado, series realizadas y participación muscular del período. Trabajo por músculo también tiene acceso directo al inicio de Stats, con mapa y selección de zonas por día, semana, mes o ciclo. Se mantienen los ajustes de reps frente al plan y las sugerencias de revisar ese objetivo cuando se repiten.', 'El cumplimiento cuenta series registradas, no mide técnica ni intensidad. Las series ponderadas por músculo no son kilos ni un nivel de fuerza. Dejar las reps precargadas no activa la revisión semanal; la app no cambia el plan automáticamente.', null],
     ['Mapa muscular', 'Los músculos de cada ejercicio', 'La ficha del ejercicio señala las zonas principales y secundarias y ofrece un enlace a Google Imágenes. El mapa de cada día reúne los grupos musculares de tu rutina para mostrar su enfoque.', 'Es orientativo: la técnica y la variante influyen. Identificar los músculos de un ejercicio no indica si están recuperados ni sustituye una valoración profesional.', null],
     ['Evolución InBody', 'Mediciones que puedes comparar', 'Pega el texto de tu hoja InBody para revisar y guardar sus mediciones. Stats reúne peso, músculo, grasa y puntuación, y dibuja su evolución entre fechas. Puedes comprobar el resumen antes de confirmar los datos.', 'La lectura depende del texto disponible y puede necesitar correcciones. Las tendencias reflejan mediciones, no resultados atribuibles a una sola sesión.', 'guide-inbody.png'],
     ['Trofeos y etapas', 'Tu colección crece contigo', 'Ocho etapas reúnen tus insignias de entrenamiento. Cuatro medallas de una etapa abren la siguiente. Cada insignia guarda su requisito y tu avance; al terminar una sesión aparecen los nuevos logros que ganaste.', 'Se calculan desde tu historial: no necesitas registrar marcas máximas ni entrenar todos los días. Si eliminas sesiones, el progreso se recalcula.', null]
@@ -3067,7 +3309,7 @@ function showWorkoutSummary(session, newlyUnlocked = [], celebrate = true) {
 }
 
 async function finishWorkout() {
-  if (!state.session || state.session.finishedAt || state.session.id === discardingSessionId) return;
+  if (!state.session || state.session.finishedAt || state.session.id === discardingSessionId || autoFinishBusy) return;
   const s = state.session;
   const before = new Set(achievementState().badges.filter(badge => badge.unlocked).map(badge => badge.id));
   $('#btn-finish').disabled = true;
@@ -3083,6 +3325,7 @@ async function finishWorkout() {
   }
   hideRest();
   state.session = null;
+  scheduleAutoFinish();
   setView('home');
   renderHome();
   renderHistory();
@@ -3181,13 +3424,14 @@ async function buildBackup() {
   const personalProfile = await db.getMeta('personalProfile');
   return {
     app: 'gymtrack',
-    version: 4,
+    version: 5,
     exportedAt: new Date().toISOString(),
     profile: state.profile.name,
     sessions: state.session ? [...state.sessions.filter(session => session.id !== state.session.id), structuredClone(state.session)] : state.sessions,
     measures: state.measures,
     routines: await db.allRoutines(),
     exercises: await db.allExercises(),
+    exerciseRatings: validateExerciseRatings(await db.getMeta('exerciseRatings')),
     preferences: trainingPreferences(await db.getMeta('trainingPreferences')),
     ...(personalProfile ? { personalProfile } : {})
   };
@@ -3245,16 +3489,16 @@ async function importBackup(file) {
     try { parsed = JSON.parse(await file.text()); }
     catch { return toast('Archivo no válido. No se importó nada.'); }
     const prepared = prepareBackup(parsed);
-    const [expectedRoutines, sessions, measures, exercises, preferences, personalProfile] = await Promise.all([
-      db.allRoutines(), db.allSessions(), db.allMeasures(), db.allExercises(), db.getMeta('trainingPreferences'), db.getMeta('personalProfile')
+    const [expectedRoutines, sessions, measures, exercises, preferences, personalProfile, exerciseRatings] = await Promise.all([
+      db.allRoutines(), db.allSessions(), db.allMeasures(), db.allExercises(), db.getMeta('trainingPreferences'), db.getMeta('personalProfile'), db.getMeta('exerciseRatings')
     ]);
-    const expectedState = { sessions, measures, exercises, preferences, personalProfile };
+    const expectedState = { sessions, measures, exercises, preferences, personalProfile, exerciseRatings };
     const candidates = backupActiveRoutines(expectedRoutines, prepared.routines);
     const activeRoutineId = candidates.length > 1 ? await chooseBackupRoutine(candidates) : null;
     if (candidates.length > 1 && !activeRoutineId) return;
     const ok = await confirmSheet({
       title: 'Importar respaldo',
-      body: `Se fusionarán ${prepared.sessions.length} sesiones, ${prepared.measures.length} mediciones, ${prepared.routines.length} rutinas y ${prepared.exercises.length} ejercicios. Los registros con el mismo ID se sobrescriben; los demás se conservan.${prepared.personalProfile ? ' También se restaurará el perfil y se aplicará a tu rutina activa sin cambiar sus ejercicios.' : ''}${prepared.preferences ? ' Se restaurarán las preferencias de entrenamiento incluidas.' : ''} No se importan credenciales.`,
+      body: `Se fusionarán ${prepared.sessions.length} sesiones, ${prepared.measures.length} mediciones, ${prepared.routines.length} rutinas y ${prepared.exercises.length} ejercicios. Los registros con el mismo ID se sobrescriben; los demás se conservan.${prepared.personalProfile ? ' También se restaurará el perfil y se aplicará a tu rutina activa sin cambiar sus ejercicios.' : ''}${prepared.preferences ? ' Se restaurarán las preferencias de entrenamiento incluidas.' : ''}${prepared.exerciseRatings ? ' Las calificaciones incluidas reemplazarán las de esos mismos ejercicios; las demás se conservan.' : ''} No se importan credenciales.`,
       confirm: 'Importar',
       cancel: 'Cancelar'
     });
@@ -3527,8 +3771,11 @@ async function openProfile(focusDate = false) {
 
 async function loadTrainingPreferences() {
   const preferences = trainingPreferences(await db.getMeta('trainingPreferences'));
+  state.exerciseRatings = validateExerciseRatings(await db.getMeta('exerciseRatings'));
   state.restSeconds = preferences.restSeconds;
   state.keepScreenAwake = preferences.keepScreenAwake;
+  state.muscleSuggestions = preferences.muscleSuggestions;
+  state.autoFinishMinutes = preferences.autoFinishMinutes;
   screenWakeLock.update();
 }
 
@@ -3541,15 +3788,28 @@ function wakeLockDescription() {
 }
 
 function openTrainingPreferences() {
-  openSheet(`<span class="eyebrow">A tu manera</span><h2>Descanso y pantalla</h2><form id="training-preferences-form" novalidate>
+  const finishLimits = [[0, 'Desactivado'], [60, '1 h'], [90, '1 h 30 min'], [120, '2 h'], [150, '2 h 30 min'], [180, '3 h']];
+  const customFinish = !finishLimits.some(([minutes]) => minutes === state.autoFinishMinutes);
+  openSheet(`<span class="eyebrow">A tu manera</span><h2>Preferencias de entrenamiento</h2><form id="training-preferences-form" novalidate>
     <p class="training-caption">El descanso del coach tiene prioridad. Esta preferencia se usa cuando el bloque no indica uno y no cambia un temporizador en curso.</p>
     <div class="seg" role="group" aria-label="Descansos habituales">${[30, 45, 60].map(value => `<button type="button" data-preferred-rest="${value}" aria-pressed="${state.restSeconds === value}" class="${state.restSeconds === value ? 'on' : ''}">${value} s</button>`).join('')}</div>
     <div class="field"><label for="preferred-rest">Personalizado · segundos (1–3600)</label><input id="preferred-rest" type="number" inputmode="numeric" min="1" max="3600" step="1" required value="${state.restSeconds}"></div>
     <label class="preference-check"><input id="keep-screen-awake" type="checkbox" ${state.keepScreenAwake ? 'checked' : ''} ${navigator.wakeLock ? '' : 'disabled'}><span>Mantener la pantalla despierta</span></label>
-    <p id="wake-support" class="training-caption">${esc(wakeLockDescription())}</p><p class="training-caption">Se guarda aquí y en tu respaldo. Las preferencias todavía no se sincronizan con Supabase.</p>
+    <p id="wake-support" class="training-caption">${esc(wakeLockDescription())}</p>
+    <label class="preference-check"><input id="muscle-suggestions" type="checkbox" ${state.muscleSuggestions ? 'checked' : ''}><span>Sugerencias del mapa corporal</span></label>
+    <div class="field"><label for="auto-finish-limit">Cerrar automáticamente después de</label><select id="auto-finish-limit">${finishLimits.map(([minutes, label]) => `<option value="${minutes}" ${minutes === state.autoFinishMinutes ? 'selected' : ''}>${label}</option>`).join('')}<option value="custom" ${customFinish ? 'selected' : ''}>Personalizado</option></select></div>
+    <div class="field" id="auto-finish-custom" ${customFinish ? '' : 'hidden'}><label for="auto-finish-minutes">Cierre personalizado · minutos</label><input id="auto-finish-minutes" type="number" inputmode="numeric" min="15" max="360" step="1" required value="${state.autoFinishMinutes || 120}" ${customFinish ? '' : 'disabled'}></div>
+    <p class="training-caption">Se aplica al iniciar una sesión nueva; no cambia el límite de una sesión en curso.</p>
+    <p class="training-caption">Se guarda aquí y en tu respaldo. Las preferencias todavía no se sincronizan con Supabase.</p>
     <p id="preferences-error" class="correction-error" role="alert"></p><div class="sheet-form-actions"><button class="btn btn-primary" type="submit">Guardar preferencias</button><button class="btn btn-ghost" id="preferences-cancel" type="button">Cancelar</button></div></form>`);
   const form = $('#training-preferences-form');
   const input = $('#preferred-rest');
+  $('#auto-finish-limit').onchange = () => {
+    const custom = $('#auto-finish-limit').value === 'custom';
+    $('#auto-finish-custom').hidden = !custom;
+    $('#auto-finish-minutes').disabled = !custom;
+    if (custom) $('#auto-finish-minutes').focus();
+  };
   const updateSelection = () => $$('[data-preferred-rest]').forEach(button => {
     const selected = Number(input.value) === Number(button.dataset.preferredRest);
     button.classList.toggle('on', selected); button.setAttribute('aria-pressed', String(selected));
@@ -3565,16 +3825,23 @@ function openTrainingPreferences() {
     const controls = [...form.querySelectorAll('button, input, select'), $('#sheet .sheet-dismiss')];
     let restoreControls;
     try {
-      const preferences = trainingPreferences({ restSeconds: Number(input.value), keepScreenAwake: $('#keep-screen-awake').checked });
+      const finishInput = $('#auto-finish-minutes');
+      if ($('#auto-finish-limit').value === 'custom' && !finishInput.checkValidity()) { finishInput.reportValidity(); return; }
+      const preferences = trainingPreferences({ restSeconds: Number(input.value), keepScreenAwake: $('#keep-screen-awake').checked,
+        muscleSuggestions: $('#muscle-suggestions').checked,
+        autoFinishMinutes: $('#auto-finish-limit').value === 'custom' ? finishInput.valueAsNumber : Number($('#auto-finish-limit').value) });
       saving = sheetBusy = true;
       restoreControls = freezeControls(controls);
       await db.setMeta('trainingPreferences', preferences);
       state.restSeconds = preferences.restSeconds;
       state.keepScreenAwake = preferences.keepScreenAwake;
+      state.muscleSuggestions = preferences.muscleSuggestions;
+      state.autoFinishMinutes = preferences.autoFinishMinutes;
       screenWakeLock.update();
       sheetBusy = false;
       closeSheet();
       $('#training-preferences-summary').textContent = `${state.restSeconds} s por defecto${state.keepScreenAwake ? ' · Pantalla activa solicitada' : ''}`;
+      if (state.view === 'body' && state.statsTab === 'strength') renderStrength();
       toast('Preferencias guardadas · El temporizador en curso no cambió.');
     } catch (error) {
       console.error('No se pudieron guardar las preferencias.', error);
@@ -3590,7 +3857,7 @@ function openPersonalSetup() {
   const hasData = state.sessions.length || state.measures.length || state.exercises.length || state.routines.length || state.profile.name;
   openSheet(`<span class="eyebrow">Perfil y preferencias</span><h2>Configurar entrenamiento</h2><p>${hasData ? 'Tus rutinas e historial se conservan. Cambia únicamente lo que necesites.' : 'Empieza importando el plan de tu gym. El perfil y los descansos se pueden ajustar cuando quieras.'}</p>
     <div class="list-card"><button class="list-row" id="setup-profile"><span class="lr-body"><strong>Tu perfil</strong><small>${esc(state.profile.name || 'Opcional: nombre y objetivo semanal')}</small></span><span aria-hidden="true">›</span></button>
-    <button class="list-row" id="setup-preferences"><span class="lr-body"><strong>Descanso y pantalla</strong><small>${state.restSeconds} s por defecto</small></span><span aria-hidden="true">›</span></button>
+    <button class="list-row" id="setup-preferences"><span class="lr-body"><strong>Preferencias de entrenamiento</strong><small>${state.restSeconds} s por defecto</small></span><span aria-hidden="true">›</span></button>
     <button class="list-row" id="setup-routines"><span class="lr-body"><strong>Mis rutinas</strong><small>${plural(state.routines.length, 'plan guardado', 'planes guardados')} · importar PDF o texto</small></span><span aria-hidden="true">›</span></button>
     <button class="list-row" id="setup-generate"><span class="lr-body"><strong>Crear rutina con mis ejercicios</strong><small>Usa los ejercicios de tus planes guardados</small></span><span aria-hidden="true">›</span></button>
     <button class="list-row" id="setup-restore"><span class="lr-body"><strong>Recuperar un respaldo</strong><small>Revisar antes de fusionar. No se vacía el dispositivo.</small></span><span aria-hidden="true">›</span></button></div>
@@ -3603,34 +3870,276 @@ function openPersonalSetup() {
   $('#setup-done').onclick = () => closeSheet();
 }
 
+async function openExerciseRatings(preferredRoutineId = null, onBack = closeSheet) {
+  const token = sheetToken;
+  let routines;
+  try {
+    const [records, ratings] = await Promise.all([db.allRoutines(), db.getMeta('exerciseRatings')]);
+    if (sheetToken !== token) return;
+    routines = records.filter(record => !record.deletedAt);
+    state.exerciseRatings = validateExerciseRatings(ratings);
+  } catch (error) {
+    toast(error.message || 'No se pudieron leer las calificaciones.');
+    return;
+  }
+  const selectedRoutine = preferredRoutineId === 'catalog' || routines.some(record => record.id === preferredRoutineId) ? preferredRoutineId : routines[0]?.id || 'catalog';
+  openSheet(`<span class="eyebrow">Tus preferencias</span><h2>Calificar ejercicios</h2><p class="training-caption">Cuánto te gusta cada ejercicio. No es una valoración de seguridad.</p>
+    <div class="field"><label for="rating-routine">Rutina</label><select id="rating-routine">${routines.map(record => `<option value="${esc(record.id)}" ${record.id === selectedRoutine ? 'selected' : ''}>${esc(record.name || 'Rutina guardada')}</option>`).join('')}<option value="catalog" ${selectedRoutine === 'catalog' ? 'selected' : ''}>Catálogo REAWAKEN</option></select></div>
+    <div class="rating-filters"><label class="field"><span>Buscar ejercicio</span><input id="rating-search" type="search" placeholder="Nombre" autocomplete="off"></label><label class="field"><span>Mostrar</span><select id="rating-filter"><option value="all">Todos</option><option value="unrated">Sin calificar</option><option value="rated">Calificados</option></select></label></div>
+    <p class="training-caption" id="rating-count"></p><div id="rating-list"></div><button class="btn btn-ghost" id="rating-back">Volver</button>`);
+  const candidates = () => {
+    const source = $('#rating-routine').value === 'catalog' ? EXERCISE_CATALOG : routines.find(record => record.id === $('#rating-routine').value)?.days?.flatMap(day => day.blocks.flatMap(block => block.movements)) || [];
+    const unique = new Map();
+    for (const exercise of source) if (!unique.has(exerciseRatingKey(exercise))) unique.set(exerciseRatingKey(exercise), exercise);
+    return [...unique.values()].sort((first, second) => first.name.localeCompare(second.name, 'es'));
+  };
+  const render = () => {
+    const all = candidates();
+    const query = normalizeExercise($('#rating-search').value);
+    const filter = $('#rating-filter').value;
+    const rows = all.filter(exercise => (!query || normalizeExercise(exercise.name).includes(query)) &&
+      (filter === 'all' || (filter === 'rated' ? exerciseRating(exercise, state.exerciseRatings) !== null : exerciseRating(exercise, state.exerciseRatings) === null)));
+    $('#rating-count').textContent = `${all.filter(exercise => exerciseRating(exercise, state.exerciseRatings) !== null).length}/${all.length} calificados · ${rows.length} visibles`;
+    $('#rating-list').innerHTML = rows.length ? rows.map((exercise, index) => {
+      const rating = exerciseRating(exercise, state.exerciseRatings);
+      return `<article class="exercise-rating-row" data-rating-row="${index}"><div class="rating-exercise-heading"><strong>${esc(exercise.name)}</strong><small>${esc(MUSCLE_GROUPS[exerciseFocus(exercise)] || 'Sin grupo asignado')}${exercise.equipment ? ` · ${esc(exercise.equipment)}` : ''}${exercise.note ? ` · ${esc(exercise.note)}` : ''}</small></div>
+        <div class="rating-actions"><div class="rating-stars" role="radiogroup" aria-label="Calificación de ${esc(exercise.name)}">${[1, 2, 3, 4, 5].map(stars => `<button type="button" role="radio" data-rating-value="${stars}" aria-checked="${rating === stars}" aria-label="${stars} ${stars === 1 ? 'estrella' : 'estrellas'}" title="${stars} ${stars === 1 ? 'estrella' : 'estrellas'}" tabindex="${(rating || 1) === stars ? 0 : -1}" class="${rating >= stars ? 'filled' : ''}"><span aria-hidden="true">★</span></button>`).join('')}</div><button type="button" class="icon-btn rating-clear" data-clear-rating aria-label="Quitar calificación de ${esc(exercise.name)}" title="Quitar calificación" ${rating === null ? 'disabled' : ''}>×</button></div><p class="rating-save-status" role="status">${rating ? `${rating}/5` : 'Sin calificar'}</p></article>`;
+    }).join('') : '<p class="training-caption">No hay ejercicios con esos filtros.</p>';
+    $$('[data-rating-row]').forEach(row => {
+      const exercise = rows[Number(row.dataset.ratingRow)];
+      const stars = [...row.querySelectorAll('[data-rating-value]')];
+      const clear = row.querySelector('[data-clear-rating]');
+      const status = row.querySelector('[role="status"]');
+      const save = async value => {
+        if (row.dataset.saving === 'true') return;
+        row.dataset.saving = 'true';
+        [...stars, clear].forEach(button => { button.disabled = true; });
+        status.textContent = 'Guardando…';
+        try {
+          state.exerciseRatings = await db.updateExerciseRating(exercise, value, exerciseRating(exercise, state.exerciseRatings));
+          status.textContent = value === null ? 'Sin calificar' : `${value}/5 · Guardado`;
+          stars.forEach(button => {
+            const count = Number(button.dataset.ratingValue);
+            button.setAttribute('aria-checked', String(count === value));
+            button.classList.toggle('filled', value !== null && count <= value);
+            button.tabIndex = count === (value || 1) ? 0 : -1;
+          });
+          $('#rating-count').textContent = `${all.filter(item => exerciseRating(item, state.exerciseRatings) !== null).length}/${all.length} calificados · ${rows.length} visibles`;
+        } catch (error) { status.textContent = error.message || 'No se guardó. Vuelve a intentar.'; }
+        finally {
+          row.dataset.saving = 'false';
+          stars.forEach(button => { button.disabled = false; });
+          clear.disabled = exerciseRating(exercise, state.exerciseRatings) === null;
+        }
+      };
+      stars.forEach((button, index) => {
+        button.onclick = () => save(Number(button.dataset.ratingValue));
+        button.onkeydown = async event => {
+          if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+          event.preventDefault();
+          const next = event.key === 'Home' ? 0 : event.key === 'End' ? 4 : (index + (event.key === 'ArrowRight' ? 1 : -1) + 5) % 5;
+          await save(next + 1); stars[next].focus();
+        };
+      });
+      clear.onclick = () => save(null);
+    });
+  };
+  $('#rating-routine').onchange = render;
+  $('#rating-filter').onchange = render;
+  $('#rating-search').oninput = render;
+  $('#rating-back').onclick = onBack;
+  render();
+}
+
 function openRoutineGenerator(previous = {}) {
   const choices = (values, selected) => values.map(([value, label]) => `<option value="${value}" ${value === selected ? 'selected' : ''}>${label}</option>`).join('');
   const savedRoutines = state.routines.filter(record => state.routineRevisions.has(record.id));
-  const savedNames = new Set(savedRoutines.flatMap(record => record.days.flatMap(day => day.blocks.flatMap(block => block.movements.map(movement => exerciseNameKey(movement.name))))));
-  openSheet(`<span class="eyebrow">Tu biblioteca de ejercicios</span><h2>Crear una rutina personalizada</h2><p class="training-caption">Por defecto usamos los ejercicios que ya aparecen en tus rutinas guardadas, incluidas las del gym. Obtendrás un borrador para revisar con tu coach; el plan actual no se reemplaza.</p><form id="generator-form">
-    <div class="field"><label for="generator-source">Ejercicios de</label><select id="generator-source" required>${choices([['routines', 'Mis rutinas guardadas'], ['personal', 'Mis rutinas y fichas personales'], ['catalog', 'Catálogo de ejemplo'], ['both', 'Guardados y catálogo']], previous.source || 'routines')}</select></div>
-    <p class="training-caption" id="generator-source-summary">Planes disponibles aquí: ${plural(savedRoutines.length, 'rutina guardada', 'rutinas guardadas')} · ${plural(savedNames.size, 'nombre de ejercicio', 'nombres de ejercicio')}. La propuesta depende del enfoque y de las indicaciones compatibles.</p>
-    <div class="field-grid"><div class="field"><label for="generator-days">Días por semana</label><input id="generator-days" type="number" min="1" max="7" required value="${previous.days || state.profile.daysPerWeek}"></div><div class="field"><label for="generator-minutes">Minutos disponibles</label><input id="generator-minutes" type="number" min="15" max="120" step="1" required value="${previous.minutes || 45}"></div>
-    <div class="field"><label for="generator-goal">Objetivo</label><select id="generator-goal">${choices([['consistency', 'Constancia'], ['strength', 'Fuerza general'], ['muscle', 'Desarrollo muscular']], previous.goal || 'consistency')}</select></div>
-    <div class="field"><label for="generator-experience">Experiencia</label><select id="generator-experience">${choices([['returning', 'Empezando o retomando'], ['regular', 'Entreno habitualmente']], previous.experience || 'returning')}</select></div>
-    <div class="field"><label for="generator-focus">Enfoque</label><select id="generator-focus">${choices([['full', 'Cuerpo completo'], ['upper', 'Tren superior'], ['lower', 'Tren inferior']], previous.focus || 'full')}</select></div>
-    <div class="field"><label for="generator-rest">Descanso por defecto (s)</label><input id="generator-rest" type="number" min="1" max="3600" required value="${previous.restSeconds || state.restSeconds}"></div></div>
-    <div class="field"><label for="generator-equipment">Equipo · opcional</label><select id="generator-equipment"><option value="">Sin filtro: verificar disponibilidad</option>${exerciseEquipmentValues().map(value => `<option value="${esc(value)}" ${value === previous.equipment ? 'selected' : ''}>${esc(value)}</option>`).join('')}</select></div>
-    <p class="training-caption">En fuentes personales se conservan las series, reps y descansos indicados. Si no hay opciones suficientes, avisamos; no completamos con otra fuente.</p>
+  const selectedIds = new Set(previous.routineIds || savedRoutines.map(record => record.id));
+  const minutes = Number(previous.minutes) || 60;
+  const durations = [[30, '30 min'], [45, '45 min'], [60, '1 h'], [90, '1 h 30 min'], [120, '2 h']];
+  const customDuration = !durations.some(([value]) => value === minutes);
+  const formatTime = value => value < 60 ? `${value} min` : `${Math.floor(value / 60)} h${value % 60 ? ` ${value % 60} min` : ''}`;
+  const formatSeconds = value => {
+    const seconds = Math.round(value), wholeMinutes = Math.floor(seconds / 60);
+    return wholeMinutes ? `${formatTime(wholeMinutes)}${seconds % 60 ? ` ${seconds % 60} s` : ''}` : `${seconds} s`;
+  };
+  let conditioning = [], conditioningSignature = '';
+  let conditioningHasSelection = Object.hasOwn(previous, 'conditioningExerciseId');
+  let phaseValuesChosen = Object.hasOwn(previous, 'warmupMinutes') || Object.hasOwn(previous, 'cardioMinutes');
+  let mode = previous.mode || 'count';
+  let cardioCountChosen = Object.hasOwn(previous, 'cardioCount');
+  openSheet(`<div class="generator-heading"><span class="eyebrow">Tu siguiente plan</span><h2>Crear rutina</h2></div><form id="generator-form" novalidate>
+    <div class="seg" role="group" aria-label="Planificar por"><button type="button" data-generator-mode="count">Cantidad</button><button type="button" data-generator-mode="time">Tiempo</button></div>
+    <p class="generator-schedule-summary" id="generator-schedule-summary" aria-live="polite"></p>
+    <div class="field-grid generator-schedule">
+      <div class="field"><label for="generator-days">Días por semana</label><div class="generator-stepper"><button type="button" id="generator-day-less" aria-label="Un día menos">−</button><input id="generator-days" type="number" inputmode="numeric" min="1" max="7" required value="${previous.days || state.profile.daysPerWeek}"><button type="button" id="generator-day-more" aria-label="Un día más">+</button></div></div>
+      <div class="field" id="generator-count-field"><label for="generator-count">Ejercicios de trabajo</label><div class="generator-stepper"><button type="button" id="generator-count-less" aria-label="Un ejercicio menos">−</button><input id="generator-count" type="number" inputmode="numeric" min="1" max="12" step="1" required value="${previous.exerciseCount ?? 6}"><button type="button" id="generator-count-more" aria-label="Un ejercicio más">+</button></div></div>
+      <div class="field" id="generator-time-field"><label for="generator-duration">Tiempo total por sesión</label><select id="generator-duration">${choices([...durations, ['custom', 'A medida']], customDuration ? 'custom' : minutes)}</select></div>
+    </div>
+    <div class="field" id="generator-custom-duration" ${customDuration ? '' : 'hidden'}><label for="generator-minutes">Tiempo disponible · minutos</label><input id="generator-minutes" type="number" inputmode="numeric" min="15" max="120" step="1" required value="${minutes}"></div>
+    <div class="field" id="generator-cardio-count-field"><label for="generator-cardio-count">Cardio aparte</label><select id="generator-cardio-count">${choices([[0, 'Sin cardio'], [1, '1 bloque · al final'], [2, '2 bloques · inicio y final']], previous.cardioCount ?? 2)}</select></div>
+    <div class="field"><label for="generator-goal">Objetivo</label><select id="generator-goal">${choices([['consistency', 'Mantener el hábito'], ['strength', 'Mejorar fuerza'], ['muscle', 'Desarrollo muscular']], previous.goal || 'consistency')}</select></div>
+    <div class="field"><label for="generator-focus">¿Qué quieres priorizar?</label><select id="generator-focus">${choices([['full', 'Cuerpo completo'], ['lower', 'Piernas y glúteos'], ['arms', 'Brazos'], ['upper', 'Tren superior']], previous.focus || 'full')}</select></div>
+    <div class="field"><label for="generator-priority">Prioridad extra · opcional</label><select id="generator-priority">${choices([['', 'Sin prioridad extra'], ...Object.entries(MUSCLE_GROUPS).filter(([group]) => !['none', 'full', 'cardio'].includes(group))], previous.priorityGroup || '')}</select></div>
+    <div class="field"><label for="generator-source">Ejercicios de</label><select id="generator-source" required>${choices([['routines', 'Mis rutinas guardadas'], ['personal', 'Rutinas y fichas personales'], ['catalog', 'Catálogo de ejemplo'], ['both', 'Guardados y catálogo']], previous.source || 'routines')}</select></div>
+    <fieldset class="generator-sources" id="generator-routines"><legend>Rutinas incluidas</legend>${savedRoutines.map(record => `<label><input type="checkbox" data-generator-routine value="${esc(record.id)}" ${selectedIds.has(record.id) ? 'checked' : ''}><span><strong>${esc(record.name)}</strong><small>${plural(record.days.length, 'día', 'días')} · ${record.active ? 'En uso' : record.archived ? 'Archivada' : 'Guardada'}</small></span></label>`).join('')}</fieldset>
+    <p class="training-caption" id="generator-source-summary"></p>
+    <div class="generator-rating-filter"><div class="field"><label for="generator-min-rating">Calificación mínima</label><select id="generator-min-rating">${choices([[0, 'Sin filtro'], [3, '3 estrellas o más'], [4, '4 estrellas o más'], [5, 'Solo 5 estrellas']], Number(previous.minRating) || 0)}</select></div><button type="button" class="text-action" id="generator-rate">Calificar ejercicios</button></div>
+    <details class="generator-options generator-session-parts" id="generator-session-parts"><summary><span id="generator-parts-title">Cardio</span><span id="generator-parts-summary"></span></summary>
+      <div class="field"><label for="generator-conditioning">Cardio de tus fuentes</label><select id="generator-conditioning"></select></div>
+      <p class="training-caption" id="generator-conditioning-status"></p>
+      <div class="field" id="generator-cardio-mode-field"><label for="generator-cardio-mode">Cardio al final</label><select id="generator-cardio-mode">${choices([['fixed', 'Duración fija'], ['remaining', 'Completar tiempo total']], previous.cardioMode || 'fixed')}</select></div>
+      <div class="field-grid"><div class="field" id="generator-warmup-field"><label for="generator-warmup" id="generator-warmup-label">Calentamiento · min</label><input id="generator-warmup" type="number" inputmode="numeric" min="0" max="30" step="1" required value="${previous.warmupMinutes ?? 0}"></div>
+      <div class="field" id="generator-cardio-fixed"><label for="generator-cardio-minutes">Cardio · min</label><input id="generator-cardio-minutes" type="number" inputmode="numeric" min="0" max="60" step="1" required value="${previous.cardioMinutes ?? 0}"></div></div>
+    </details>
+    <details class="generator-options"><summary>Más opciones</summary><div class="field-grid">
+      <div class="field"><label for="generator-experience">Experiencia</label><select id="generator-experience">${choices([['returning', 'Empezando o retomando'], ['regular', 'Entreno habitualmente']], previous.experience || 'returning')}</select></div>
+      <div class="field"><label for="generator-rest">Descanso por defecto · s</label><input id="generator-rest" type="number" inputmode="numeric" min="1" max="3600" required value="${previous.restSeconds || state.restSeconds}"></div>
+      <div class="field"><label for="generator-equipment">Equipo</label><select id="generator-equipment"><option value="">Cualquier equipo</option>${exerciseEquipmentValues().map(value => `<option value="${esc(value)}" ${value === previous.equipment ? 'selected' : ''}>${esc(value)}</option>`).join('')}</select></div>
+    </div></details>
     <p id="generator-error" class="correction-error" role="alert"></p><div class="sheet-form-actions"><button class="btn btn-primary" type="submit">Ver propuesta</button><button class="btn btn-ghost" type="button" id="generator-cancel">Cancelar</button></div></form>`);
+  const selectedRoutineIds = () => $$('[data-generator-routine]:checked').map(input => input.value);
+  const selectedConditioning = () => conditioning.find(choice => choice.key === $('#generator-conditioning').value);
+  const readOptions = () => ({ mode, exerciseCount: Number($('#generator-count').value), cardioCount: Number($('#generator-cardio-count').value),
+    source: $('#generator-source').value, days: Number($('#generator-days').value),
+    minutes: Number($('#generator-minutes').value), goal: $('#generator-goal').value,
+    experience: $('#generator-experience').value, focus: $('#generator-focus').value,
+    priorityGroup: $('#generator-priority').value,
+    restSeconds: Number($('#generator-rest').value), equipment: $('#generator-equipment').value,
+    minRating: Number($('#generator-min-rating').value), routineIds: selectedRoutineIds(),
+    warmupMinutes: mode === 'count' && Number($('#generator-cardio-count').value) !== 2 ? 0 : Number($('#generator-warmup').value),
+    cardioMinutes: mode === 'count' && Number($('#generator-cardio-count').value) === 0 ? 0 : Number($('#generator-cardio-minutes').value),
+    cardioMode: mode === 'count' ? 'fixed' : $('#generator-cardio-mode').value, conditioningExerciseId: selectedConditioning()?.id || '',
+    conditioningSourceId: selectedConditioning()?.sourceId || '', idPrefix: `generated-${uid()}` });
+  $('#generator-rate').onclick = () => {
+    const options = readOptions();
+    openExerciseRatings(options.source === 'catalog' ? 'catalog' : options.routineIds[0], () => openRoutineGenerator(options));
+  };
+  const refresh = () => {
+    const byCount = mode === 'count';
+    const days = Number($('#generator-days').value);
+    const available = Number($('#generator-minutes').value);
+    const count = Number($('#generator-count').value);
+    $$('[data-generator-mode]').forEach(button => { const selected = button.dataset.generatorMode === mode; button.classList.toggle('on', selected); button.setAttribute('aria-pressed', String(selected)); });
+    $('#generator-count-field').hidden = !byCount;
+    $('#generator-count').disabled = !byCount;
+    $('#generator-count-less').disabled = !byCount || count <= 1;
+    $('#generator-count-more').disabled = !byCount || count >= 12;
+    $('#generator-time-field').hidden = byCount;
+    $('#generator-duration').disabled = byCount;
+    $('#generator-minutes').disabled = byCount;
+    $('#generator-custom-duration').hidden = byCount || $('#generator-duration').value !== 'custom';
+    $('#generator-cardio-count-field').hidden = !byCount;
+    $('#generator-cardio-count').disabled = !byCount;
+    $('#generator-day-less').disabled = days <= 1;
+    $('#generator-day-more').disabled = days >= 7;
+    const source = $('#generator-source').value;
+    const selected = savedRoutines.filter(record => selectedRoutineIds().includes(record.id));
+    const names = new Set(selected.flatMap(record => record.days.flatMap(day => day.blocks.flatMap(block => block.movements.map(movement => exerciseNameKey(movement.name))))));
+    $('#generator-routines').hidden = source === 'catalog' || !savedRoutines.length;
+    $('#generator-source-summary').textContent = source === 'catalog' ? 'Catálogo REAWAKEN' : `${plural(selected.length, 'rutina seleccionada', 'rutinas seleccionadas')} · ${plural(names.size, 'nombre de ejercicio', 'nombres de ejercicio')}${source === 'personal' || source === 'both' ? ' · Incluye fichas personales' : ''}${source === 'both' ? ' y catálogo' : ''}`;
+    conditioning = conditioningChoices(source, { catalog: EXERCISE_CATALOG, routines: selected, exercises: state.exercises });
+    const signature = JSON.stringify(conditioning.map(choice => [choice.key, choice.name]));
+    const chooser = $('#generator-conditioning');
+    if (signature !== conditioningSignature) {
+      const current = chooser.value || (!conditioningSignature && previous.conditioningExerciseId ? JSON.stringify([previous.conditioningSourceId || '', previous.conditioningExerciseId]) : '');
+      chooser.innerHTML = conditioning.length ? '<option value="">Elige un ejercicio</option>' + conditioning.map(choice => `<option value="${esc(choice.key)}">${esc(choice.name)} · ${esc(choice.sourceName)}</option>`).join('') : '<option value="">Sin opciones en estas fuentes</option>';
+      chooser.value = conditioning.some(choice => choice.key === current) ? current : conditioningHasSelection ? '' : conditioning[0]?.key || '';
+      conditioningHasSelection ||= Boolean(chooser.value);
+      conditioningSignature = signature;
+    }
+    if (!phaseValuesChosen && conditioning.length) {
+      $('#generator-warmup').value = '5';
+      $('#generator-cardio-minutes').value = '15';
+      phaseValuesChosen = true;
+    }
+    if (!cardioCountChosen) $('#generator-cardio-count').value = conditioning.length ? '2' : '0';
+    const cardioCount = Number($('#generator-cardio-count').value);
+    chooser.disabled = !conditioning.length;
+    $('#generator-conditioning-status').textContent = !conditioning.length ? 'Las fuentes no incluyen cardio. Elige otra fuente para añadirlo; no usaremos un ejercicio externo.' : !chooser.value ? 'Elige un ejercicio de estas fuentes para el calentamiento y el cardio.' : '';
+    const fillCardio = !byCount && $('#generator-cardio-mode').value === 'remaining';
+    chooser.required = byCount ? cardioCount > 0 : Number($('#generator-warmup').value) > 0 || fillCardio || Number($('#generator-cardio-minutes').value) > 0;
+    $('#generator-cardio-mode-field').hidden = byCount;
+    $('#generator-cardio-mode').disabled = byCount;
+    $('#generator-warmup-field').hidden = byCount && cardioCount !== 2;
+    $('#generator-warmup').disabled = byCount && cardioCount !== 2;
+    $('#generator-warmup').min = byCount ? '1' : '0';
+    $('#generator-warmup-label').textContent = byCount ? 'Cardio inicial · min' : 'Calentamiento · min';
+    $('#generator-cardio-fixed').hidden = fillCardio || (byCount && cardioCount === 0);
+    $('#generator-cardio-minutes').disabled = fillCardio || (byCount && cardioCount === 0);
+    $('#generator-cardio-minutes').min = byCount ? '1' : '0';
+    $('#generator-parts-title').textContent = byCount ? 'Cardio' : 'Calentamiento y cardio';
+    $('#generator-parts-summary').textContent = byCount ? `${cardioCount} ${cardioCount === 1 ? 'bloque' : 'bloques'}` : `${Number($('#generator-warmup').value) || 0} min + ${fillCardio ? 'restante' : `${Number($('#generator-cardio-minutes').value) || 0} min`}`;
+    $('#generator-schedule-summary').textContent = `${days >= 1 && days <= 7 ? plural(days, 'día', 'días') : 'Elige los días'} · ${byCount ? `${count} ejercicios + ${cardioCount} cardio` : available >= 15 && available <= 120 ? `${formatTime(available)} en total` : 'Elige la duración'}`;
+  };
+  $$('[data-generator-mode]').forEach(button => { button.onclick = () => { mode = button.dataset.generatorMode; refresh(); }; });
+  $('#generator-duration').onchange = () => {
+    const value = $('#generator-duration').value;
+    $('#generator-custom-duration').hidden = value !== 'custom';
+    if (value !== 'custom') $('#generator-minutes').value = value;
+    refresh();
+    if (value === 'custom') $('#generator-minutes').focus();
+  };
+  $('#generator-days').oninput = refresh;
+  $('#generator-count').oninput = refresh;
+  $('#generator-count-less').onclick = () => { $('#generator-count').stepDown(); refresh(); };
+  $('#generator-count-more').onclick = () => { $('#generator-count').stepUp(); refresh(); };
+  $('#generator-cardio-count').onchange = () => {
+    cardioCountChosen = true;
+    const count = Number($('#generator-cardio-count').value);
+    if (count > 0 && !Number($('#generator-cardio-minutes').value)) $('#generator-cardio-minutes').value = '15';
+    if (count === 2 && !Number($('#generator-warmup').value)) $('#generator-warmup').value = '5';
+    refresh();
+  };
+  $('#generator-minutes').oninput = refresh;
+  $('#generator-source').onchange = refresh;
+  $('#generator-conditioning').onchange = refresh;
+  for (const selector of ['#generator-warmup', '#generator-cardio-minutes', '#generator-cardio-mode']) {
+    $(selector).oninput = () => { phaseValuesChosen = true; refresh(); };
+  }
+  $$('[data-generator-routine]').forEach(input => { input.onchange = refresh; });
+  $('#generator-day-less').onclick = () => { $('#generator-days').stepDown(); refresh(); };
+  $('#generator-day-more').onclick = () => { $('#generator-days').stepUp(); refresh(); };
   $('#generator-cancel').onclick = () => closeSheet();
+  refresh();
   $('#generator-form').onsubmit = event => {
     event.preventDefault();
-    const options = {
-      source: $('#generator-source').value, days: Number($('#generator-days').value),
-      minutes: Number($('#generator-minutes').value), goal: $('#generator-goal').value,
-      experience: $('#generator-experience').value, focus: $('#generator-focus').value,
-      restSeconds: Number($('#generator-rest').value), equipment: $('#generator-equipment').value, idPrefix: `generated-${uid()}`
-    };
+    if (!event.currentTarget.checkValidity()) {
+      const invalid = event.currentTarget.querySelector(':invalid');
+      const details = invalid?.closest('details');
+      if (details) details.open = true;
+      invalid?.reportValidity();
+      return;
+    }
+    const options = readOptions();
     try {
+      if (options.source === 'routines' && savedRoutines.length && !options.routineIds.length) throw new Error('Elige al menos una rutina como fuente.');
       const proposal = generateRoutine(options, { catalog: EXERCISE_CATALOG,
-        routines: state.routines.filter(record => state.routineRevisions.has(record.id)), exercises: state.exercises });
-      openSheet(`<span class="eyebrow">Borrador sin guardar</span><h2>Vista previa de la rutina</h2><p class="training-caption">Revisa y ajusta el resultado antes de guardarlo. Tu rutina actual y sus registros se conservan.</p><div class="generator-preview">${proposal.days.map(day => `<section><h3>${esc(day.label)} <small>~${day.estimatedMinutes} min</small></h3>${day.blocks.map(block => `<p><strong>${esc(block.movements[0].name)}</strong><small>${block.sets} series · ${esc(block.movements[0].reps)} · descanso ${block.rest} s</small></p>`).join('')}</section>`).join('')}</div>${proposal.warnings.map(warning => `<p class="training-caption">${esc(warning)}</p>`).join('')}<div class="sheet-form-actions"><button class="btn btn-primary" id="generator-edit">Revisar y editar</button><button class="btn btn-ghost" id="generator-back">Cambiar opciones</button></div>`);
+        routines: savedRoutines.filter(record => options.routineIds.includes(record.id)), exercises: state.exercises, ratings: state.exerciseRatings });
+      openSheet(`<div class="generator-heading"><span class="eyebrow">Borrador sin guardar</span><h2>Tu nueva rutina</h2><p id="generator-time-budget">${plural(proposal.days.length, 'día', 'días')} · ${options.mode === 'count' ? `${options.exerciseCount} ejercicios + ${options.cardioCount} cardio` : `Objetivo ${formatTime(options.minutes)} en total`}</p></div>
+        <div class="generator-day-tabs" role="tablist" aria-label="Días de la propuesta">${proposal.days.map((day, index) => `<button id="generator-day-tab-${index}" role="tab" data-generator-day="${index}" aria-controls="generator-day-${index}" aria-selected="${index === 0}" tabindex="${index === 0 ? 0 : -1}">${esc(day.label)}</button>`).join('')}</div>
+        <div class="generator-preview">${proposal.days.map((day, index) => `<section id="generator-day-${index}" role="tabpanel" aria-labelledby="generator-day-tab-${index}" ${index ? 'hidden' : ''}><div class="generator-day-summary"><div><span class="eyebrow">${options.mode === 'count' ? 'Trabajo por sesión' : 'Tiempo total estimado'}</span><h3>${options.mode === 'count' ? `${options.exerciseCount} ejercicios` : `~${formatTime(day.estimatedMinutes)}`}</h3><span>${options.mode === 'count' ? `${options.cardioCount} bloques de cardio aparte` : plural(day.blocks.length, 'bloque', 'bloques')}</span></div><div class="generator-atlas">${muscleAtlas(dayFocus(day))}</div></div>
+        <details class="generator-time-details"><summary>${options.mode === 'count' ? `Tiempo orientativo · ~${formatTime(day.estimatedMinutes)}` : 'Distribución del tiempo'}</summary><p class="training-caption">Supuestos: 3 s por repetición y 1 min por cambio de bloque, más descansos y tiempos elegidos. No es tu ritmo medido.</p><dl>${[['Calentamiento', 'warmupSeconds'], ['Trabajo muscular', 'strengthSeconds'], ['Descansos', 'restSeconds'], ['Cambios de equipo', 'transitionSeconds'], ['Cardio', 'cardioSeconds']].map(([label, key]) => `<div><dt>${label}</dt><dd data-time-part="${key}" data-seconds="${day.timing[key]}">${formatSeconds(day.timing[key])}</dd></div>`).join('')}</dl></details>
+        <ol>${day.blocks.map((block, position) => `<li data-generator-kind="${exerciseFocus(block.movements[0]) === 'cardio' ? 'cardio' : 'work'}"><span class="generator-position">${position + 1}</span><div>${block.tag ? `<span class="generator-phase">${esc(block.tag)}</span>` : ''}<strong>${esc(block.movements[0].name)}</strong><small>${block.movements[0].timer ? `${formatSeconds(block.movements[0].timer)}${block.sets > 1 ? ` · ${block.sets} intervalos` : ''}` : `${block.sets} series · ${esc(block.movements[0].reps)} reps`}${block.rest ? ` · ${block.rest} s descanso` : ''}</small><span class="generator-muscle">${esc(MUSCLE_GROUPS[exerciseFocus(block.movements[0])] || 'Sin grupo asignado')}</span></div><a class="generator-image-link" href="${esc(imageSearchUrl(block.movements[0].name))}" target="_blank" rel="noopener noreferrer" aria-label="Buscar imágenes de ${esc(block.movements[0].name)} en Google" title="Google Imágenes">↗</a></li>`).join('')}</ol></section>`).join('')}</div>
+        ${proposal.warnings.length > 2 ? `<ul class="generator-warnings">${proposal.warnings.slice(2).map(warning => `<li>${esc(warning)}</li>`).join('')}</ul>` : ''}<details class="generator-options"><summary>Sobre esta propuesta</summary>${proposal.warnings.slice(0, 2).map(warning => `<p class="training-caption">${esc(warning)}</p>`).join('')}</details>
+        <div class="sheet-form-actions"><button class="btn btn-primary" id="generator-edit">Revisar y editar</button><button class="btn btn-ghost" id="generator-back">Cambiar opciones</button></div>`);
+      const tabs = $$('[data-generator-day]');
+      const selectDay = index => {
+        tabs.forEach((button, position) => {
+          button.setAttribute('aria-selected', String(position === index));
+          button.tabIndex = position === index ? 0 : -1;
+          $(`#generator-day-${position}`).hidden = position !== index;
+        });
+      };
+      tabs.forEach((button, index) => {
+        button.onclick = () => selectDay(index);
+        button.onkeydown = event => {
+          if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+          event.preventDefault();
+          const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+          selectDay(next); tabs[next].focus();
+        };
+      });
       $('#generator-back').onclick = () => openRoutineGenerator(options);
       $('#generator-edit').onclick = () => openEditor(proposal.days, proposal.warnings, {
         name: 'Rutina personalizada', activate: false, source: 'generated', generation: proposal.provenance
@@ -3638,6 +4147,7 @@ function openRoutineGenerator(previous = {}) {
     } catch (error) {
       console.error('No se pudo preparar la propuesta.', error);
       $('#generator-error').textContent = error.message;
+      if (/cardio|calentamiento/i.test(error.message)) $('#generator-session-parts').open = true;
     }
   };
 }
@@ -3833,6 +4343,15 @@ function bindGlobal() {
 
   $('#btn-edit-routine').onclick = openRoutineCatalog;
   $('#btn-exercise-library').onclick = openExerciseLibrary;
+  $('#btn-exercise-ratings').onclick = () => openExerciseRatings(state.routineId);
+  $('#stats-battery').onclick = event => {
+    event.currentTarget.focus({ preventScroll: true });
+    trainingUI.openBattery();
+  };
+  $('#stats-muscle-work').onclick = event => {
+    event.currentTarget.focus({ preventScroll: true });
+    trainingUI.openMuscleWork();
+  };
 
   $('#ed-cancel').onclick = async () => {
     if (state.edDirty) {
@@ -3924,13 +4443,14 @@ function bindGlobal() {
   // Guardado defensivo al salir de la app (iOS puede matarla en segundo plano)
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') saveSession(true)?.catch(warnSessionSave);
-    else { tickCountdown(); renderInBodyReminder(); renderRoutineAlert(); }
+    else { tickCountdown(); renderInBodyReminder(); renderRoutineAlert(); processAutoFinish(); }
   });
   window.addEventListener('pagehide', () => saveSession(true)?.catch(warnSessionSave));
 
   let reminderDate = dateKey(Date.now());
   setInterval(() => {
     if (state.view === 'workout' && state.session) updateWorkoutHeader();
+    if (document.visibilityState === 'visible') processAutoFinish();
     if (reminderDate !== dateKey(Date.now())) {
       reminderDate = dateKey(Date.now());
       renderInBodyReminder(); renderRoutineAlert();
@@ -3967,6 +4487,7 @@ async function init() {
     renderHome();
     bindGlobal();
     finishLaunch();
+    await processAutoFinish();
   } catch (error) {
     console.error('No se pudo iniciar la vista con los datos locales.', error);
     $('#app').innerHTML = '<section class="page startup-error"><div class="notice warn" role="alert"><h1>No pudimos abrir tus datos</h1><p>No se borró el almacenamiento. No iniciaremos una configuración nueva sobre tus registros.</p></div><button class="btn btn-primary" id="startup-retry">Reintentar</button></section>';

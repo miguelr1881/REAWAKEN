@@ -34,5 +34,20 @@ export function runProgressTests() {
   assert(first.nextBadge.stage === 1, 'next target follows stage advancement');
   assert(all.nextBadge === null, 'completed collection has no fake next target');
   assert(same.badges.find(badge => badge.id === 'week').remainingText === 'Falta 1 semana con 5 días entrenados.', 'weekly requirement retains distinct-day goal');
+  const flexibleNow = new Date(2026, 8, 13, 18).getTime();
+  for (let goal = 1; goal <= 7; goal++) {
+    const sessions = Array.from({ length: goal }, (_, index) => {
+      const startedAt = flexibleNow - (goal - index - 1) * 86400000 - 60000;
+      return { id: `goal-${goal}-${index}`, startedAt, finishedAt: startedAt + 30000, entries: {}, progress: { done: 8, total: 8 } };
+    });
+    const before = JSON.stringify(sessions);
+    const achieved = trainingAchievements(sessions, progressFor, goal, flexibleNow);
+    const incomplete = trainingAchievements(sessions.slice(0, -1), progressFor, goal, flexibleNow);
+    assert(achieved.week.target === goal && achieved.week.value === goal, `Weekly target supports ${goal} days`);
+    assert(achieved.badges.find(badge => badge.id === 'week').unlocked, `Weekly trophy supports ${goal} distinct training days`);
+    assert(!incomplete.badges.find(badge => badge.id === 'week').unlocked, `Weekly trophy requires the complete ${goal}-day goal`);
+    assert(achieved.badges.map(badge => badge.id).join() === empty.badges.map(badge => badge.id).join(), `Trophy identities remain stable for ${goal} days`);
+    assert(JSON.stringify(sessions) === before, `Changing a weekly target does not rewrite sessions for ${goal} days`);
+  }
   return { checks, result: 'PASS' };
 }
