@@ -18,7 +18,7 @@ import { sessionPersonalRecords } from './personal-records.js';
 import { generateRoutine, conditioningChoices } from './routine-generator.js';
 import { exerciseRatingKey, exerciseRating, validateExerciseRatings } from './exercise-ratings.js';
 
-const APP_VERSION = '2.9.12';
+const APP_VERSION = '2.9.15';
 
 /* ============================== Estado ============================== */
 
@@ -440,19 +440,17 @@ function lastPerformance(movementId, excludeId) {
   const movement = sessionDay(state.session)?.blocks.flatMap(block => block.movements).find(item => item.id === movementId);
   if (!movement) return null;
   const choice = equipmentChoice(state.session, movement);
-  const prev = state.sessions
-    .filter(s => s.finishedAt && s.id !== excludeId && s.entries?.[movementId])
-    .sort((a, b) => b.startedAt - a.startedAt);
-  for (const s of prev) {
-    const original = sessionDay(s)?.blocks.flatMap(block => block.movements).find(item => item.id === movementId);
-    if (!original || original.name !== movement.name || original.reps !== movement.reps) continue;
-    const vals = s.entries[movementId].map((value, index) => {
+  const history = movementHistoryRows(movement, state.sessions.filter(previous => previous.id !== excludeId && previous.startedAt < state.session.startedAt), state.session.startedAt, sessionDay);
+  for (const { session: previous, movement: original } of history) {
+    if (original.reps !== movement.reps || normalizeExercise(original.note) !== normalizeExercise(movement.note) ||
+        (original.equipment && movement.equipment && normalizeExercise(original.equipment) !== normalizeExercise(movement.equipment))) continue;
+    const values = previous.entries[original.id].map((value, index) => {
       if (typeof value !== 'string' || !recordedSet(value)) return null;
-      const record = setRecord(s, movementId, index);
-      const compatible = record ? comparisonKey(movement, choice) === comparisonKey(original, record) : !s.entries?._training && choice.variant === 'original' && choice.label === 'Habitual' && choice.unit === 'escala';
+      const record = setRecord(previous, original.id, index);
+      const compatible = record ? comparisonKey(movement, choice) === comparisonKey(original, record) : !previous.entries?._training && choice.variant === 'original' && choice.label === 'Habitual' && choice.unit === 'escala';
       return compatible ? value : null;
     });
-    if (vals.some(value => value !== null)) return { values: vals, at: s.startedAt };
+    if (values.some(value => value !== null)) return { values, at: previous.startedAt };
   }
   return null;
 }
@@ -1620,7 +1618,7 @@ async function saveRoutine(days, name, newCycle = false) {
     return {
       routines: changes,
       sessions: pendingSessionSnapshots(sessions, previousDays),
-      exercises: routineExerciseChanges(clean, targetId, exerciseSource, exercises, Boolean(draftGeneration)),
+      exercises: routineExerciseChanges(clean, targetId, exerciseSource, exercises, Boolean(draftGeneration) || exerciseSource === 'imported'),
       result: newCycle && activate && oldActive?.days?.length ? oldCycle : null
     };
   });
@@ -1638,7 +1636,7 @@ function exerciseNameKey(name) {
 }
 
 function routineExerciseChanges(days, routineId, origin, existing, preserveExisting = false) {
-  const byName = new Map(existing.map(record => [record.nameKey || exerciseNameKey(record.name), record]));
+  const current = new Map(existing.map(record => [record.id, record]));
   const changes = new Map();
   const catalogByName = new Map(EXERCISE_CATALOG.map(record => [exerciseNameKey(record.name), record]));
   const personalSource = origin === 'imported' ? 'imported' : origin === 'restored' ? 'restored' : 'private';
@@ -1647,8 +1645,22 @@ function routineExerciseChanges(days, routineId, origin, existing, preserveExist
     const name = String(movement.name || '').trim();
     const nameKey = exerciseNameKey(name);
     if (!name || !nameKey) continue;
-    const previous = byName.get(nameKey);
-    if (previous && preserveExisting) continue;
+    const candidates = [...current.values()].filter(record => !record.deletedAt &&
+      (record.nameKey || exerciseNameKey(record.name)) === nameKey &&
+      ['kind', 'equipment', 'note'].every(key => !record[key] || !movement[key] || exerciseNameKey(record[key]) === exerciseNameKey(movement[key])));
+    const contexts = new Set(candidates.map(record => JSON.stringify([record.kind, exerciseNameKey(record.equipment || ''), exerciseNameKey(record.note || '')])));
+    const linked = candidates.filter(record => ['importedRoutineIds', 'createdRoutineIds', 'restoredRoutineIds'].some(key => record[key]?.includes(routineId)));
+    const previous = linked.length === 1 ? linked[0] : contexts.size === 1 ? candidates[0] : null;
+    if (!previous && candidates.length || !previous && preserveExisting && [...current.values()].some(record => record.deletedAt && (record.nameKey || exerciseNameKey(record.name)) === nameKey)) continue;
+    if (previous && preserveExisting) {
+      const sourceKey = personalSource === 'imported' ? 'importedRoutineIds' : personalSource === 'restored' ? 'restoredRoutineIds' : 'createdRoutineIds';
+      if (previous.deletedAt || previous[sourceKey]?.includes(routineId)) continue;
+      const record = { ...previous, [sourceKey]: [...new Set([...(previous[sourceKey] || []), routineId])],
+        sources: [...new Set([...(previous.sources || (previous.source ? [previous.source] : [])), personalSource])], updatedAt: now };
+      changes.set(record.id, record);
+      current.set(record.id, record);
+      continue;
+    }
     const catalogMatch = catalogByName.get(nameKey);
     const sources = new Set(previous?.sources || (previous?.source ? [previous.source] : []));
     sources.add(personalSource);
@@ -1661,6 +1673,7 @@ function routineExerciseChanges(days, routineId, origin, existing, preserveExist
       kind: previous?.kind || movement.kind || catalogMatch?.kind || 'weight',
       timer: previous?.timer ?? movement.timer,
       equipment: previous?.equipment || movement.equipment || catalogMatch?.equipment || '',
+      ...(previous?.note || movement.note ? { note: previous?.note || movement.note } : {}),
       source: sources.has('private') ? 'private' : sources.has('imported') ? 'imported' : 'restored',
       sources: [...sources],
       importedRoutineIds: personalSource === 'imported' ? [...new Set([...(previous?.importedRoutineIds || []), routineId])] : previous?.importedRoutineIds || [],
@@ -1671,7 +1684,7 @@ function routineExerciseChanges(days, routineId, origin, existing, preserveExist
       updatedAt: now
     };
     changes.set(record.id, record);
-    byName.set(nameKey, record);
+    current.set(record.id, record);
   }
   return [...changes.values()];
 }
@@ -1895,13 +1908,20 @@ function exerciseEquipmentValues() {
   ].filter(Boolean))].sort((first, second) => first.localeCompare(second, 'es'));
 }
 
+function exerciseRoutineRefs(record) {
+  if (record.source === 'catalog') return [];
+  const ids = new Set(['importedRoutineIds', 'createdRoutineIds', 'restoredRoutineIds'].flatMap(key => Array.isArray(record[key]) ? record[key] : []));
+  return state.routines.filter(routine => !routine.deletedAt && routine.source !== 'cycle' && ids.has(routine.id));
+}
+
 function exerciseCard(record, lastUsed) {
   const action = record.source === 'catalog'
     ? `<button class="routine-card-action" data-exercise-copy="${esc(record.id)}" aria-label="Crear ficha personal de ${esc(record.name)}" title="Crear ficha personal">${ED_ICON.plus}</button>`
     : `<button class="routine-card-action" data-exercise-edit="${esc(record.id)}" aria-label="Editar ${esc(record.name)}" title="Editar">${ED_ICON.edit}</button>`;
   const details = [record.gym, record.zone, ...(Array.isArray(record.tags) ? record.tags : [])].filter(Boolean);
+  const routines = exerciseRoutineRefs(record);
   return `<article class="exercise-card">
-    <div class="exercise-card-copy"><strong>${record.favorite ? '<span class="exercise-favorite" aria-label="Favorito">★</span> ' : ''}${esc(record.name)}</strong><small>${esc(exerciseGroupLabel(record))} · ${esc(exerciseKindLabel(record.kind))}${record.equipment ? ` · ${esc(record.equipment)}` : ''}</small>${details.length ? `<small>${esc(details.join(' · '))}</small>` : ''}${lastUsed ? `<small>Último registro con este nombre: ${fmtDate(lastUsed, { day: 'numeric', month: 'short' })}</small>` : ''}<span class="exercise-card-source">${esc(exerciseSourceLabel(record))}</span>${record.duplicateCount > 1 ? `<small>${record.duplicateCount} fichas idénticas agrupadas · sin borrar registros</small>` : ''}</div>
+    <div class="exercise-card-copy"><strong>${record.favorite ? '<span class="exercise-favorite" aria-label="Favorito">★</span> ' : ''}${esc(record.name)}</strong><small>${esc(exerciseGroupLabel(record))} · ${esc(exerciseKindLabel(record.kind))}${record.equipment ? ` · ${esc(record.equipment)}` : ''}</small>${details.length ? `<small>${esc(details.join(' · '))}</small>` : ''}${lastUsed ? `<small>Último registro con este nombre: ${fmtDate(lastUsed, { day: 'numeric', month: 'short' })}</small>` : ''}<span class="exercise-card-source">${esc(exerciseSourceLabel(record))}</span>${routines.length ? `<small class="exercise-card-routines">${esc(routines.map(routine => routine.name || 'Rutina sin nombre').join(' · '))}</small>` : ''}${record.duplicateCount > 1 ? `<small>${record.duplicateCount} fichas idénticas agrupadas · sin borrar registros</small>` : ''}</div>
     ${action}
   </article>`;
 }
@@ -1909,6 +1929,7 @@ function exerciseCard(record, lastUsed) {
 function renderExerciseLibrary() {
   const query = exerciseNameKey($('#exercise-search')?.value || '');
   const source = $('#exercise-source')?.value || 'all';
+  const routineId = $('#exercise-routine-filter')?.value || 'all';
   const group = $('#exercise-group-filter')?.value || 'all';
   const equipment = $('#exercise-equipment-filter')?.value || 'all';
   const organization = $('#exercise-organization')?.value || 'all';
@@ -1923,10 +1944,12 @@ function renderExerciseLibrary() {
   }
   const records = allExerciseRecords().filter(record => {
     const sources = exerciseSourceSet(record);
+    const routines = exerciseRoutineRefs(record);
     const searchable = [record.name, record.gym, record.zone, ...(Array.isArray(record.tags) ? record.tags : [])].filter(Boolean).join(' ');
     return (!query || exerciseNameKey(searchable).includes(query)) &&
       (organization === 'all' || (organization === 'favorites' ? record.favorite : organization.startsWith('gym:') && record.gym === organization.slice(4))) &&
       (source === 'all' || (source === 'catalog' ? record.source === 'catalog' : sources.has(source) || (source === 'imported' && record.source === 'import'))) &&
+      (routineId === 'all' || (routineId === 'shared' ? routines.length > 1 : routines.some(routine => routine.id === routineId))) &&
       (group === 'all' || exerciseGroupKey(record) === group) &&
       (equipment === 'all' || (equipment === 'none' ? !record.equipment : record.equipment === equipment));
   }).sort((first, second) => Number(Boolean(second.favorite)) - Number(Boolean(first.favorite)) || first.name.localeCompare(second.name, 'es'));
@@ -1996,6 +2019,7 @@ function openExerciseLibrary() {
         <label class="field"><span>Origen</span><select id="exercise-source"><option value="all">Todos</option><option value="catalog">Catálogo base</option><option value="imported">Importados</option><option value="restored">De rutinas guardadas</option><option value="private">Creados por ti</option></select></label>
         <label class="field"><span>Enfoque</span><select id="exercise-group-filter"><option value="all">Todos</option>${Object.entries(MUSCLE_GROUPS).map(([key, label]) => `<option value="${key}">${esc(label)}</option>`).join('')}</select></label>
       </div>
+      <label class="field"><span>Rutina de origen</span><select id="exercise-routine-filter"><option value="all">Todas</option><option value="shared">Compartidos entre rutinas</option>${state.routines.filter(routine => !routine.deletedAt && routine.source !== 'cycle').map(routine => `<option value="${esc(routine.id)}">${esc(routine.name || 'Rutina sin nombre')}${routine.archived ? ' · Archivada' : ''}</option>`).join('')}</select></label>
       <label class="field"><span>Equipo</span><select id="exercise-equipment-filter"><option value="all">Todos</option><option value="none">Sin equipo indicado</option>${exerciseEquipmentValues().map(equipment => `<option value="${esc(equipment)}">${esc(equipment)}</option>`).join('')}</select></label>
       <label class="field"><span>Mi organización</span><select id="exercise-organization"><option value="all">Todos</option><option value="favorites">Favoritos</option>${[...new Set(state.exercises.map(record => record.gym).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'es')).map(gym => `<option value="gym:${esc(gym)}">${esc(gym)}</option>`).join('')}</select></label>
     </div>
@@ -2006,6 +2030,7 @@ function openExerciseLibrary() {
   renderExerciseLibrary();
   $('#exercise-search').oninput = renderExerciseLibrary;
   $('#exercise-source').onchange = renderExerciseLibrary;
+  $('#exercise-routine-filter').onchange = renderExerciseLibrary;
   $('#exercise-group-filter').onchange = renderExerciseLibrary;
   $('#exercise-equipment-filter').onchange = renderExerciseLibrary;
   $('#exercise-organization').onchange = renderExerciseLibrary;
@@ -3100,9 +3125,9 @@ function openFunctions() {
     ['Corregir pesos anteriores', 'Una serie, sin rehacer el entrenamiento', 'Abre una fecha en Historial, entra a la sesión y toca Corregir debajo del peso. Revisa el valor anterior, escribe el correcto y guarda. La fecha, las reps, las notas, el resto de las series y los datos del equipo se conservan. Los récords y la curva vuelven a calcularse desde el historial corregido.', 'Cancelar no guarda. Si otro dispositivo o ventana cambió el registro local, debes volver a abrirlo; un error conserva el valor escrito para reintentar. Guardado local no significa sincronización remota confirmada.', null],
     ['Rutina desde PDF', 'Del documento a un plan editable', 'Carga el PDF de tu coach: la app extrae los días, ejercicios, series y reps en este dispositivo. Revisa los avisos y corrige el resultado antes de guardar. Un nuevo ciclo separa el balance del plan anterior sin cambiar tus sesiones pasadas.', 'Necesita un PDF con texto; para un escaneo usa Live Text y pega el contenido. No interpreta todos los diseños ni sustituye la revisión.', 'guide-pdf.png'],
     ['Sugerencias de carga', 'Solo cuando hay evidencia para subir', 'Muestra una propuesta tras tres entrenamientos completos en días distintos, con las reps altas del plan y el mismo patrón de cargas por serie: primera con primera, segunda con segunda. No exige que todas usen un único peso. Busca en las últimas seis semanas, en el mismo ciclo, con un registro en las últimas dos. Mantener o bajar no produce un panel; la propuesta puede quedar visible para la próxima sesión.', 'No propone cifras ni cambia tu plan. Las indicaciones de peso mínimo, ligero, no exigente o sin peso impiden una subida automática; las molestias mantienen su advertencia. Las reps precargadas no miden esfuerzo ni garantizan que debas subir. Tres sesiones es una regla prudente de la app, no una prescripción clínica individual.', 'guide-load.png'],
-    ['Muscle Battery', 'La carga reciente de cada grupo muscular', 'Su acceso está al inicio de Stats, junto a Trabajo por músculo. Reúne las series de carga de tus sesiones finalizadas durante los últimos 14 días, distribuye la participación muscular y reduce su peso con el tiempo. Puedes seleccionar una zona en el mapa o en la lista. El detalle de Tu balance se conserva.', 'Es una estimación, no una batería real ni permiso para volver a entrenar. No conoce tu sueño, alimentación, dolor o fatiga; sin registros suficientes no puede valorar una zona. No es una medición de fuerza ni de recuperación.', null],
+    ['Muscle Battery', 'La carga reciente de cada grupo muscular', 'Su acceso está al inicio de Stats, junto a Muscle Work. Reúne las series de carga de tus sesiones finalizadas durante los últimos 14 días, distribuye la participación muscular y reduce su peso con el tiempo. Puedes seleccionar una zona en el mapa o en la lista. El detalle de Tu balance se conserva.', 'Es una estimación, no una batería real ni permiso para volver a entrenar. No conoce tu sueño, alimentación, dolor o fatiga; sin registros suficientes no puede valorar una zona. No es una medición de fuerza ni de recuperación.', null],
     ['Tendencias', 'Comparaciones con registros visibles', 'En Fuerza y Tu balance puedes ver una comparación reciente desde dos fechas con la misma primera serie, reps, equipo y ciclo. Se etiqueta como comparación puntual. Con seis sesiones comparables en al menos dos semanas puede mostrar carga estable o un cambio sostenido: tres anteriores frente a tres recientes, al menos un 5% y sin solapamiento. Cada observación abre sus sesiones de origen.', 'Separa unidad y origen de reps: precargadas o ajustadas. No mezcla ciclos, no analiza asistencia ni afirma que ganaste o perdiste fuerza. Las comparaciones puntuales no afectan Muscle Battery. Si faltan referencias, lo explica sin completar datos antiguos.', null],
-    ['Tu balance', 'Tu entrenamiento por día, semana, mes o ciclo', 'Reúne sesiones, tiempo registrado, series realizadas y participación muscular del período. Trabajo por músculo también tiene acceso directo al inicio de Stats, con mapa y selección de zonas por día, semana, mes o ciclo. Se mantienen los ajustes de reps frente al plan y las sugerencias de revisar ese objetivo cuando se repiten.', 'El cumplimiento cuenta series registradas, no mide técnica ni intensidad. Las series ponderadas por músculo no son kilos ni un nivel de fuerza. Dejar las reps precargadas no activa la revisión semanal; la app no cambia el plan automáticamente.', null],
+    ['Tu balance', 'Tu entrenamiento por día, semana, mes o ciclo', 'Reúne sesiones, tiempo registrado, series realizadas y participación muscular del período. Muscle Work también tiene acceso directo al inicio de Stats, con mapa y selección de zonas por día, semana, mes o ciclo. Se mantienen los ajustes de reps frente al plan y las sugerencias de revisar ese objetivo cuando se repiten.', 'El cumplimiento cuenta series registradas, no mide técnica ni intensidad. Las series ponderadas por músculo no son kilos ni un nivel de fuerza. Dejar las reps precargadas no activa la revisión semanal; la app no cambia el plan automáticamente.', null],
     ['Mapa muscular', 'Los músculos de cada ejercicio', 'La ficha del ejercicio señala las zonas principales y secundarias y ofrece un enlace a Google Imágenes. El mapa de cada día reúne los grupos musculares de tu rutina para mostrar su enfoque.', 'Es orientativo: la técnica y la variante influyen. Identificar los músculos de un ejercicio no indica si están recuperados ni sustituye una valoración profesional.', null],
     ['Evolución InBody', 'Mediciones que puedes comparar', 'Pega el texto de tu hoja InBody para revisar y guardar sus mediciones. Stats reúne peso, músculo, grasa y puntuación, y dibuja su evolución entre fechas. Puedes comprobar el resumen antes de confirmar los datos.', 'La lectura depende del texto disponible y puede necesitar correcciones. Las tendencias reflejan mediciones, no resultados atribuibles a una sola sesión.', 'guide-inbody.png'],
     ['Trofeos y etapas', 'Tu colección crece contigo', 'Ocho etapas reúnen tus insignias de entrenamiento. Cuatro medallas de una etapa abren la siguiente. Cada insignia guarda su requisito y tu avance; al terminar una sesión aparecen los nuevos logros que ganaste.', 'Se calculan desde tu historial: no necesitas registrar marcas máximas ni entrenar todos los días. Si eliminas sesiones, el progreso se recalcula.', null]

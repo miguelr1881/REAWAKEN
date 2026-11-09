@@ -25,7 +25,7 @@ const BODYWEIGHT = [
   'battle rope', 'soga', 'zancadas en caminata', 'dominadas agarre prono con liga'
 ];
 
-const CARDIO = ['cardio', 'escaleras', 'caminadora', 'movilidad', 'estiramiento', 'movi articular'];
+const CARDIO = ['cardio', 'escaleras', 'caminadora', 'eliptica', 'movilidad', 'estiramiento', 'movi articular'];
 
 const DAY_ACCENTS = ['#FF453A', '#0A84FF', '#BF5AF2', '#FF9F0A', '#30D158', '#5E5CE6', '#FF375F'];
 
@@ -55,7 +55,7 @@ function splitNote(raw) {
     notes.push(note.trim());
     return ' ';
   });
-  return { name: cleanName(name), note: notes.join(' · ') || undefined };
+  return cleanName(name) ? { name: cleanName(name), note: notes.join(' · ') || undefined } : { name: cleanName(notes.join(' · ')), note: undefined };
 }
 
 const DAY_RE = /^(?:piso\s*:?\s*)?d[ií]a\s*([0-9]+)\s*[:.\-]?\s*(.*)$/i;
@@ -63,12 +63,21 @@ const REPS_TOKEN = /^(?:f|\d+[a-z]?(?:[+_]\d+[a-z]?)*[a-z%]*)$/i;
 const REST_RE = /rest\s*(\d+)\s*s/i;
 const DURATION_RE = /(\d+\s*(?:a\s*\d+\s*)?m(?:in|i)?\b|\d+\s*s(?:eg)?\b)/i;
 
+function durationSeconds(text) {
+  const match = String(text || '').trim().match(/^(\d+)\s*(m(?:in|i)?|s(?:eg)?)$/i);
+  return match ? Number(match[1]) * (/^m/i.test(match[2]) ? 60 : 1) : null;
+}
+
 /**
  * Busca la cola "<series> <reps>" al final de la fila. Se prueba de la cola más
  * larga a la más corta porque "4 5 a 6" tiene que leerse como 4 series de 5 a 6.
  * @returns {{ name: string, sets: number, reps: string }|null}
  */
 function matchTail(text) {
+  const cells = text.split('\t');
+  if (cells.length === 3 && /^(?:[1-9]|1[0-2])$/.test(cells[1].trim())) {
+    return { name: cells[0].trim(), sets: Number(cells[1]), reps: cells[2].trim() || '—' };
+  }
   const duration = text.match(/^(.+?)\s+([1-9]|1[0-2])\s+(\d+\s*(?:min|mi|m|seg|s)(?:\s+abs)?)$/i);
   if (duration) return { name: duration[1], sets: Number(duration[2]), reps: duration[3] };
   const tokens = text.replace(/\s*(rps|reps|rep)\b/gi, '').trim().split(/\s+/);
@@ -114,10 +123,10 @@ function splitByPlus(text) {
     if (c === '[' || c === '(' || c === '{') depth++;
     else if (c === ']' || c === ')' || c === '}') depth = Math.max(0, depth - 1);
 
-    if (c === '+' && depth === 0) {
-      const prev = text.slice(0, i).trimEnd().slice(-1);
-      const next = text.slice(i + 1).trimStart().charAt(0);
-      if (!(/\d/.test(prev) && /\d/.test(next))) {
+    if ((c === '+' || c === '_') && depth === 0) {
+      const remainder = text.slice(i + 1).trimStart();
+      const prescription = /^\d/.test(remainder) && !/^\d+\s*s\s*[[({]/i.test(remainder) || /^parciales?\b/i.test(remainder);
+      if (!prescription) {
         parts.push(cur);
         cur = '';
         continue;
@@ -135,11 +144,12 @@ function buildMovements(name, reps) {
   return parts.map((part, i) => {
     const namedDuration = part.replace(/^(\d+\s*s)\s*[\[({]([^\])}]+)[\])}]\s*$/i, '$2 $1').replace(/^[\[({]([^\])}]+)[\])}]\s*(\d+\s*s)$/i, '$1 $2');
     const { name: mvName, note } = splitNote(namedDuration);
-    const localDuration = namedDuration.match(/\b(\d+)\s*s\b/i);
+    const localDurations = [...namedDuration.matchAll(/(\d+)\s*(?:s(?:eg)?|min|mi)\b/gi)].map(match => match[0]);
     const repsValue = parts.length === 1 && repParts.length > 1 ? reps : repParts[i] || (repParts.length === 1 ? repParts[0] : reps) || '—';
-    const movementReps = repParts.length === 1 && parts.length > 1 && /min|\babs\b/i.test(repsValue) && localDuration ? `${localDuration[1]}s` : repsValue;
-    const seconds = String(movementReps).match(/^(\d+)\s*s(?:eg)?$/i);
-    const timer = seconds && Number(seconds[1]) >= 1 && Number(seconds[1]) <= 7200 ? Number(seconds[1]) : undefined;
+    const localTime = repParts.length === 1 && parts.length > 1 && /min|\babs\b|^\d+$/i.test(repsValue);
+    const movementReps = localTime && localDurations.length ? localDurations.join(' + ') : repsValue;
+    const seconds = localTime && !localDurations.length && /min|\babs\b/i.test(repsValue) ? null : durationSeconds(movementReps);
+    const timer = seconds >= 1 && seconds <= 7200 ? seconds : undefined;
     return {
       id: nextId('m'),
       name: mvName,
@@ -194,17 +204,28 @@ export function parseRoutineText(text) {
       continue;
     }
 
+    if (/^(?:nota\b|(?:primera?|segunda?|tercera?|cuarta?|\d+)\s+semana\b)/i.test(line)) {
+      flushLeftovers();
+      warnings.push(`${day ? `${day.label}: ` : ''}nota del coach: "${line}". Revisa su alcance antes de aplicarla.`);
+      continue;
+    }
+
     if (!day) continue;
 
     // Cardio y movilidad no traen series ni reps: se cierran de inmediato para
     // que no se peguen a la fila siguiente.
-    if (!buffer.length && isCardio(line) && !matchTail(line)) {
-      const { rest } = splitFloor(line);
+    if (!buffer.length && isCardio(line)) {
+      const tail = line.includes('\t') ? matchTail(line) : null;
+      const { rest } = splitFloor(tail?.name || line);
       const { name, note } = splitNote(cleanName(rest));
       if (name) {
+        const namedDuration = rest.match(DURATION_RE)?.[1]?.trim();
+        const cellDuration = tail?.reps;
+        const conflict = durationSeconds(namedDuration) !== null && durationSeconds(cellDuration) !== null && durationSeconds(namedDuration) !== durationSeconds(cellDuration);
+        if (conflict) warnings.push(`${day.label}: "${name}" indica ${namedDuration} en el nombre y ${cellDuration} en la columna. Confirma la duración.`);
         pushBlock({
-          id: nextId('b'), floor: null, tag: 'Cardio', sets: 1,
-          movements: [{ id: nextId('m'), name, reps: (line.match(DURATION_RE)?.[1] || '—').trim(), kind: 'check', note }]
+          id: nextId('b'), floor: null, tag: 'Cardio', sets: tail?.sets || 1,
+          movements: [{ id: nextId('m'), name, reps: conflict ? `${namedDuration} / ${cellDuration} (PDF)` : cellDuration || namedDuration || '—', kind: 'check', note }]
         });
         continue;
       }
@@ -222,6 +243,7 @@ export function parseRoutineText(text) {
 
     buffer = [];
     const { floor, rest } = splitFloor(tail.name);
+    if ((rest.match(/\[/g) || []).length > (rest.match(/\]/g) || []).length) warnings.push(`${day.label}: corchete sin cerrar en "${rest.slice(0, 70)}". Revisa la separación entre ejercicios y notas.`);
     const movements = buildMovements(rest, tail.reps);
     if (!movements.length) continue;
 

@@ -23,11 +23,12 @@ export function pdfTextLines(items, viewport, warnings = []) {
   const flush = () => {
     if (!pending) return;
     const name = pending.names.join(' '), series = pending.series.join(' '), reps = pending.reps.join(' ');
-    if (reps) {
+    if (series || reps) {
       const sets = series.match(/^\d{1,2}\b/)?.[0];
       if (!sets) warnings.push(`No se indicaron series para "${name.slice(0, 60)}". Se proponen 3; revísalas.`);
+      if (!reps) warnings.push(`No se indicaron reps para "${name.slice(0, 60)}". Revisa la indicación en su nombre o nota.`);
       const rest = series.match(/REST\s*(\d+)\s*S/i);
-      output.push(`${name}${rest ? ` REST ${rest[1]}s` : ''} ${sets || 3} ${reps}`);
+      output.push(`${name}${rest ? ` REST ${rest[1]}s` : ''}\t${sets || 3}\t${reps || '—'}`);
     } else output.push(name);
     pending = null;
   };
@@ -37,7 +38,7 @@ export function pdfTextLines(items, viewport, warnings = []) {
     const repsHeader = line.fragments.find(fragment => /^reps?$/i.test(fragment.text.trim()));
     if (seriesHeader && repsHeader) {
       flush();
-      columns = { series: seriesHeader.left - 4, reps: repsHeader.left - 4 };
+      columns = { series: seriesHeader.left - 4, reps: (seriesHeader.left + seriesHeader.width + repsHeader.left) / 2 };
       output.push(text);
       continue;
     }
@@ -45,13 +46,13 @@ export function pdfTextLines(items, viewport, warnings = []) {
     const name = join(line.fragments.filter(fragment => fragment.left < columns.series));
     const series = join(line.fragments.filter(fragment => fragment.left >= columns.series && fragment.left < columns.reps));
     const reps = join(line.fragments.filter(fragment => fragment.left >= columns.reps));
-    const cardio = /^(?:(?:1\s*o\s*2|[12])\s+)?(?:\d+\s*(?:min|m)\s+)?(?:card\b|cardio\b|movilidad|estiramiento|escaleras|caminadora)/i.test(name);
+    const cardio = /^(?:(?:1\s*o\s*2|[12])\s+)?(?:\d+\s*(?:min|m)\s+)?(?:card\b|cardio\b|movilidad|estiramiento|escaleras|caminadora|el[ií]ptica)/i.test(name);
     if (cardio) {
       flush();
-      output.push(`${name}${/^\d+$/.test(series) && reps ? ` ${series} ${reps}` : ''}`);
+      output.push(`${name}${reps ? `\t${/^\d+$/.test(series) ? series : 1}\t${reps}` : ''}`);
       continue;
     }
-    const startsRow = /^(?:1\s*o\s*2|[12])\s+/i.test(name) || /^\d{1,2}(?:\s|$)/.test(series) || Boolean(reps && name);
+    const startsRow = /^(?:1\s*o\s*2|[12])\s+/i.test(name) || /^\d{1,2}(?:\s|$)/.test(series) || Boolean(reps && name && !/^[+_]/.test(name) && !/^_/.test(reps));
     if (startsRow) flush();
     pending ||= { names: [], series: [], reps: [] };
     if (name) pending.names.push(name);
