@@ -1641,11 +1641,6 @@ input, textarea { font-size: 16px; }
 .strength-suggestion p { font-size: 13px; line-height: 1.5; margin-top: 6px; }
 .strength-suggestion .text-action, .strength-preferences { min-height: 44px; }
 .strength-history-chart > summary { font-size: 13px; color: var(--text-2); }
-#view-body:has(#strength-atlas) .stats-muscle-tools .battery-entry { min-height: 110px; padding: 12px; }
-#view-body:has(#strength-atlas) .stats-muscle-tools .battery-entry > span:first-child { display: block; }
-#view-body:has(#strength-atlas) .stats-muscle-tools .battery-entry > span:first-child > :first-child { margin: 0 0 6px; }
-#view-body:has(#strength-atlas) .stats-muscle-tools .battery-entry strong { font-size: 18px; }
-#view-body:has(#strength-atlas) .stats-muscle-tools .battery-entry small { display: none; }
 @media (max-width: 359px) {
   .strength-body { gap: 16px; grid-template-columns: 1fr; min-height: 0; }
   .strength-atlas { width: 100%; max-width: 260px; margin-inline: auto; }

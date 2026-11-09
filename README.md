@@ -8,7 +8,7 @@
 
 Una app de entrenamiento personal que funciona sin conexión, conserva tu historial y convierte tus registros en una colección de progreso.
 
-![Versión](https://img.shields.io/badge/versión-2.9.12-5B3DF5?style=flat-square)
+![Versión](https://img.shields.io/badge/versión-2.9.15-5B3DF5?style=flat-square)
 ![PWA](https://img.shields.io/badge/PWA-offline--first-087982?style=flat-square)
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES_modules-F7DF1E?style=flat-square&logo=javascript&logoColor=14141a)
 ![Nube opcional](https://img.shields.io/badge/Supabase-opcional-167D36?style=flat-square)
@@ -25,7 +25,7 @@ REAWAKEN es una **PWA de registro de entrenamiento**, diseñada para consultarse
 
 Desde el 14 de octubre de 2026, el alcance es **uso exclusivo de Miguel**: sin marketplace, comunidad, rankings ni reseñas para terceros. La petición del 15 de octubre prioriza estética y mejoras de uso diario, sin exigir identificar kg o lb ni cambiar datos reales.
 
-La versión local de esta carpeta es **2.9.12**, sin publicar. La última entrega publicada es **2.9.3**. Las pruebas automatizadas no sustituyen la revisión de los datos reales ni de Safari/PWA en el iPhone.
+Esta carpeta corresponde a **2.9.15**. Muscle Battery y Muscle Work mantienen su tamaño entre pestañas; hay filtro por rutina de origen y correcciones de PDF. Importar otro plan conserva los detalles de las fichas existentes. La referencia del último peso admite un ID nuevo cuando el ejercicio, la prescripción y el contexto coinciden; no mezcla equipos explícitamente distintos ni inventa unidades. Las pruebas automatizadas no sustituyen Safari/PWA físico. Los datos personales y las rutinas nuevas no forman parte de los recursos publicables.
 
 La idea es sencilla: **registrar lo que hiciste sin convertir cada serie en un formulario**. Las repeticiones del plan ya están visibles, el peso anterior sirve de referencia y puedes corregir lo necesario directamente en el ejercicio.
 
