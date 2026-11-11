@@ -1,4 +1,4 @@
-import { autoFinishSession, bodyWeightReference, convertSessionLoadsToKg, reviewSessionLoadUnits, correctSessionWeight, movementLoadHistory, movementHistoryRows } from '../js/session-history.js';
+import { autoFinishSession, bodyWeightReference, convertSessionLoadsToKg, reviewSessionLoadUnits, correctSessionDetails, correctSessionWeight, movementLoadHistory, movementHistoryRows } from '../js/session-history.js';
 import { nextSetAdvice, personalBestForSet, setRecord, trainingCoverage } from '../js/intelligence.js';
 import { prepareBackup } from '../js/backup.js';
 
@@ -42,6 +42,41 @@ export function runSessionHistoryTests() {
           recordedAt: now - daysAgo * 86400000, timeSource: 'registration', custom: 'preserve' }, null] } } }
   });
   const original = make('old', 5, 200);
+  const incomplete = make('incomplete', 2, 20);
+  incomplete.routineSnapshot.blocks[0].movements.push({ id: 'check', name: 'Movilidad', kind: 'check', reps: '30s', timer: 30 });
+  incomplete.entries.check = [false, true];
+  incomplete.entries._training.choices.press.unit = 'lb';
+  const incompleteBefore = JSON.stringify(incomplete);
+  const completed = correctSessionDetails(incomplete, { sets: [
+    { movementId: 'press', index: 1, value: '25,5', reps: '12' },
+    { movementId: 'check', index: 0, value: true },
+    { movementId: 'check', index: 1, value: false }
+  ], notes: ' Nota corregida ', durationMinutes: 75 }, now);
+  assert(completed.entries.press[1] === '25.5' && completed.entries.check.join() === 'true,false', 'Full correction fills missing weights and toggles completed checks');
+  assert(setRecord(completed, 'press', 1).unit === 'lb' && setRecord(completed, 'press', 1).reps === 12, 'Missing set uses only its own session choice and explicit reps');
+  assert(setRecord(completed, 'press', 1).timeSource === 'correction' && setRecord(completed, 'press', 1).recordedAt === now, 'Retrospective entry does not fabricate an original set timestamp');
+  assert(completed.notes === 'Nota corregida' && completed.entries._durationMinutes === 75, 'Full correction supports notes and total duration');
+  assert(completed.startedAt === incomplete.startedAt && completed.finishedAt === incomplete.finishedAt && JSON.stringify(completed.routineSnapshot) === JSON.stringify(incomplete.routineSnapshot), 'Full correction preserves dates and original plan');
+  assert(JSON.stringify(incomplete) === incompleteBefore && JSON.stringify(completed.entries.another) === JSON.stringify(incomplete.entries.another), 'Full correction leaves source and unrelated entries untouched');
+  const cleared = correctSessionDetails(completed, { sets: [{ movementId: 'press', index: 1, value: '' }] }, now);
+  assert(cleared.entries.press[1] === '' && cleared.entries._training.sets.press[1] === null, 'Clearing a weight removes linked metadata as well');
+  const repsOnly = correctSessionDetails(original, { sets: [{ movementId: 'press', index: 0, value: '200', reps: 8 }] }, now);
+  assert(setRecord(repsOnly, 'press', 0).reps === 8 && setRecord(repsOnly, 'press', 0).custom === 'preserve' && setRecord(repsOnly, 'press', 0).rir === 2, 'Rep correction preserves unrelated set metadata');
+  const emptySession = { ...structuredClone(incomplete), entries: {} };
+  const filled = correctSessionDetails(emptySession, { sets: [{ movementId: 'press', index: 1, value: '0', reps: 10 }] }, now);
+  assert(filled.entries.press.join(',') === ',0' && setRecord(filled, 'press', 1).unit === 'escala', 'Entirely empty session can be filled from its own snapshot without invented units');
+  for (const change of [
+    { movementId: 'press', index: 2, value: '20' }, { movementId: 'unknown', index: 0, value: '20' },
+    { movementId: '_cycle', index: 0, value: '20' }, { movementId: 'check', index: 0, value: '20' },
+    { movementId: 'press', index: 0, value: '-1' }, { movementId: 'press', index: 0, value: '20', reps: 0 },
+    { movementId: 'press', index: 0, value: '20', reps: 100 }, { movementId: 'press', index: 0, value: '20', reps: 2.5 }
+  ]) rejects(() => correctSessionDetails(incomplete, { sets: [change] }, now), 'Invalid full-session correction is rejected');
+  rejects(() => correctSessionDetails({ ...incomplete, finishedAt: null }, { sets: [] }), 'Full correction cannot edit a live workout');
+  rejects(() => correctSessionDetails({ ...incomplete, deletedAt: now }, { sets: [] }), 'Full correction cannot resurrect a deleted workout');
+  rejects(() => correctSessionDetails(incomplete, { durationMinutes: 0 }), 'Full correction validates duration');
+  rejects(() => correctSessionDetails(incomplete, { sets: false }), 'Full correction rejects malformed changes');
+  rejects(() => correctSessionDetails(incomplete, { sets: [{ movementId: 'press', index: 0, value: '20', reps: true }] }), 'Boolean reps are not silently converted to one');
+  assert(JSON.stringify(prepareBackup(JSON.parse(JSON.stringify({ app: 'gymtrack', version: 5, sessions: [completed] }))).sessions[0]) === JSON.stringify(completed), 'Full correction and retrospective metadata survive backup round trip');
   const unfinished = { ...make('auto-close', 1, 25), startedAt: now - 120 * 60000, finishedAt: null };
   unfinished.entries._autoFinish = { version: 1, limitMinutes: 120 };
   const unfinishedBefore = JSON.stringify(unfinished);

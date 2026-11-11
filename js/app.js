@@ -11,14 +11,14 @@ import { EMPTY_PROFILE, normalizeProfile, validProfileDate, monthlyInBody, valid
 import { sessionDuration, trainingAchievements } from './progress.js';
 import { enterView, resizeContent, disclose, bindDisclosures } from './motion.js';
 import { createTrainingUI } from './training-ui.js';
-import { equipmentChoice, setRecord, comparisonKey, personalBestForSet, normalizeExercise, trainingCoverage } from './intelligence.js';
-import { autoFinishSession, bodyWeightReference, correctSessionWeight, movementLoadHistory, movementHistoryRows } from './session-history.js';
+import { equipmentChoice, setRecord, comparisonKey, personalBestForSet, normalizeExercise, trainingCoverage, repPrescription } from './intelligence.js';
+import { autoFinishSession, bodyWeightReference, correctSessionDetails, correctSessionWeight, movementLoadHistory, movementHistoryRows } from './session-history.js';
 import { trainingPreferences, createScreenWakeLock, validAutoFinishMinutes } from './training-preferences.js';
 import { sessionPersonalRecords } from './personal-records.js';
 import { generateRoutine, conditioningChoices } from './routine-generator.js';
 import { exerciseRatingKey, exerciseRating, validateExerciseRatings } from './exercise-ratings.js';
 
-const APP_VERSION = '2.9.15';
+const APP_VERSION = '2.9.16';
 
 /* ============================== Estado ============================== */
 
@@ -1186,7 +1186,7 @@ function showSessionDetail(id) {
     <h2>${esc(day?.title || 'Entrenamiento anterior')}</h2>
     <p>${fmtDate(s.startedAt)} · ${fmtDuration(sessionDuration(s))}</p>
     ${s.entries?._autoFinish?.closedAt ? `<p class="training-caption">Cierre automático tras ${fmtDuration(s.entries._autoFinish.limitMinutes * 60000)}${s.entries._autoFinish.reviewedAt ? ' · Revisado' : ' · Pendiente de revisión'}</p>${!s.entries._autoFinish.reviewedAt ? '<button class="btn btn-ghost" id="auto-finish-confirm">Dejar así</button>' : ''}` : ''}
-    <div class="session-actions"><button class="btn btn-ghost duration-edit" id="edit-duration">Editar duración</button>
+    <div class="session-actions"><button class="btn btn-primary history-edit-session" id="edit-session">${ED_ICON.edit} Editar sesión</button><button class="btn btn-ghost duration-edit" id="edit-duration">Editar duración</button>
     <button class="btn btn-ghost" id="session-day-report">Balance del día</button></div>
     ${!s.routineSnapshot ? '<p class="session-legacy">Esta sesión no conserva una copia original de su rutina. Los datos disponibles pueden no reflejar el plan de ese día.</p>' : ''}
     <div class="summary-grid">
@@ -1202,6 +1202,7 @@ function showSessionDetail(id) {
   `);
 
   $('#sheet-close').onclick = closeSheet;
+  $('#edit-session').onclick = () => openHistorySessionEditor(id);
   if ($('#auto-finish-confirm')) $('#auto-finish-confirm').onclick = () => acceptAutoFinish(id);
   $('#edit-duration').onclick = () => openDurationEditor(s, () => showSessionDetail(id));
   $('#session-day-report').onclick = () => trainingUI.openProgress('day', s.startedAt);
@@ -3122,7 +3123,7 @@ function openFunctions() {
     ['Mi gym y favoritos', 'Fichas privadas y fáciles de encontrar', 'En Ejercicios puedes crear una ficha personal desde el catálogo o editar una tuya. Lugar o colección, zona, etiquetas y favoritos son opcionales. Los favoritos aparecen primero en el selector; puedes buscar por estos campos y filtrar por lugar. El último registro se obtiene del historial con ese nombre.', 'No modifica rutinas ni marcas anteriores, no adivina unidades ni confirma disponibilidad de equipo. Usa nombres diferentes para distinguir máquinas; las fichas se conservan en el respaldo, no se sincronizan todavía.', null],
     ['Actividad anual', 'Tu constancia en doce meses', 'En Historial, Tu año de entrenamiento reúne las sesiones finalizadas por mes. Elige otro año o toca un mes para abrir sus fechas y registros. Varias sesiones el mismo día cuentan por separado, pero ese día cuenta una sola vez como activo.', 'Es actividad registrada, no intensidad ni cumplimiento de objetivos. No borra ni reinicia el historial al cambiar de año.', null],
     ['Progreso por ejercicio', 'Tus cargas a lo largo del tiempo', 'Stats tiene vistas Fuerza, Cuerpo y Constancia. En Fuerza aparecen cargas, últimas marcas, búsqueda y observaciones. Cada curva usa la mayor carga registrada por sesión con las mismas reps y contexto. El acceso de Historial se conserva. Al terminar verás los PR superados, con marca anterior y nueva; solo se muestra el mejor de cada contexto.', 'No es un nivel de fuerza ni una estimación de 1RM. No convierte kg o lb ni puede detectar cambios de máquina o escala no registrados. Una reimportación con ID nuevo conserva la referencia si la coincidencia del ejercicio y su contexto es única. Nunca se inventan metadatos antiguos.', null],
-    ['Corregir pesos anteriores', 'Una serie, sin rehacer el entrenamiento', 'Abre una fecha en Historial, entra a la sesión y toca Corregir debajo del peso. Revisa el valor anterior, escribe el correcto y guarda. La fecha, las reps, las notas, el resto de las series y los datos del equipo se conservan. Los récords y la curva vuelven a calcularse desde el historial corregido.', 'Cancelar no guarda. Si otro dispositivo o ventana cambió el registro local, debes volver a abrirlo; un error conserva el valor escrito para reintentar. Guardado local no significa sincronización remota confirmada.', null],
+    ['Editar sesiones anteriores', 'Completar lo que hiciste y corregir el registro', 'Abre una fecha en Historial, entra a la sesión y toca Editar sesión. Puedes completar pesos vacíos, corregir reps, marcar o desmarcar series realizadas y ajustar la nota y duración. Guardar aplica todos los cambios juntos; los resúmenes y récords se recalculan. El corrector rápido de un peso sigue disponible.', 'Se conservan las fechas, la copia del plan y las unidades conocidas. No se inventan ejercicios que no estén en el registro ni se cambia la rutina activa. Cancelar descarta los cambios tras confirmación. Un error mantiene el formulario y un cambio concurrente impide sobrescribirlo. Guardado local no significa sincronización remota confirmada.', null],
     ['Rutina desde PDF', 'Del documento a un plan editable', 'Carga el PDF de tu coach: la app extrae los días, ejercicios, series y reps en este dispositivo. Revisa los avisos y corrige el resultado antes de guardar. Un nuevo ciclo separa el balance del plan anterior sin cambiar tus sesiones pasadas.', 'Necesita un PDF con texto; para un escaneo usa Live Text y pega el contenido. No interpreta todos los diseños ni sustituye la revisión.', 'guide-pdf.png'],
     ['Sugerencias de carga', 'Solo cuando hay evidencia para subir', 'Muestra una propuesta tras tres entrenamientos completos en días distintos, con las reps altas del plan y el mismo patrón de cargas por serie: primera con primera, segunda con segunda. No exige que todas usen un único peso. Busca en las últimas seis semanas, en el mismo ciclo, con un registro en las últimas dos. Mantener o bajar no produce un panel; la propuesta puede quedar visible para la próxima sesión.', 'No propone cifras ni cambia tu plan. Las indicaciones de peso mínimo, ligero, no exigente o sin peso impiden una subida automática; las molestias mantienen su advertencia. Las reps precargadas no miden esfuerzo ni garantizan que debas subir. Tres sesiones es una regla prudente de la app, no una prescripción clínica individual.', 'guide-load.png'],
     ['Muscle Battery', 'La carga reciente de cada grupo muscular', 'Su acceso está al inicio de Stats, junto a Muscle Work. Reúne las series de carga de tus sesiones finalizadas durante los últimos 14 días, distribuye la participación muscular y reduce su peso con el tiempo. Puedes seleccionar una zona en el mapa o en la lista. El detalle de Tu balance se conserva.', 'Es una estimación, no una batería real ni permiso para volver a entrenar. No conoce tu sueño, alimentación, dolor o fatiga; sin registros suficientes no puede valorar una zona. No es una medición de fuerza ni de recuperación.', null],
@@ -3209,7 +3210,7 @@ function bindSessionCorrection(form, original, update, onSaved) {
       errorText.textContent = error.message;
       return;
     }
-    const controls = [...form.querySelectorAll('button, input'), $('#sheet .sheet-dismiss')];
+    const controls = [...form.querySelectorAll('button, input, select, textarea'), $('#sheet .sheet-dismiss')];
     saving = true;
     sheetBusy = true;
     form.setAttribute('aria-busy', 'true');
@@ -3244,6 +3245,77 @@ function bindSessionCorrection(form, original, update, onSaved) {
     toast('Corrección guardada · En este dispositivo.');
     sync.syncQuietly();
   };
+}
+
+async function openHistorySessionEditor(id) {
+  const token = sheetToken;
+  let original;
+  try { original = await sessionForCorrection(id); }
+  catch (error) { toast(error.message); return; }
+  if (token !== sheetToken) return;
+  const fields = [];
+  const blocks = original.routineSnapshot?.blocks ? [...original.routineSnapshot.blocks] : [];
+  const knownIds = new Set(blocks.flatMap(block => block.movements.map(movement => movement.id)));
+  const extra = Object.entries(original.entries).filter(([key, values]) => !key.startsWith('_') && Array.isArray(values) && !knownIds.has(key));
+  if (extra.length) blocks.push({ sets: 0, movements: extra.map(([movementId, values], index) => ({
+    id: movementId, name: `Ejercicio ${index + 1}`, kind: values.some(value => typeof value === 'string') ? 'weight' : 'check', reps: ''
+  })) });
+  const totalMinutes = Math.min(1440, Math.max(1, Math.round(sessionDuration(original) / 60000)));
+  const rows = blocks.map(block => block.movements.map(movement => {
+    const values = original.entries[movement.id] || [];
+    const sets = Array.from({ length: Math.max(block.sets || 0, values.length) }, (_, index) => {
+      const record = setRecord(original, movement.id, index);
+      const weight = typeof values[index] === 'string' ? values[index] : '';
+      const reps = record?.reps ?? original.entries._training?.repDrafts?.[movement.id]?.[index] ?? (weight.trim() === '' ? repPrescription(movement)?.max : null);
+      const unit = record?.unit || original.entries._training?.choices?.[movement.id]?.unit;
+      const field = { movementId: movement.id, index, kind: movement.kind, value: movement.kind === 'weight' ? weight : values[index] === true,
+        reps: Number.isInteger(reps) ? String(reps) : '', hasRecord: Boolean(record), planReps: repPrescription(movement)?.max };
+      const position = fields.push(field) - 1;
+      const label = `${movement.name}, serie ${index + 1}`;
+      return `<div class="session-edit-row" data-history-set="${position}"><span class="session-edit-number">${index + 1}</span>${movement.kind === 'weight'
+        ? `<label class="field"><span>Peso${['kg', 'lb'].includes(unit) ? ` · ${unit}` : ''}</span><input data-history-weight="${position}" inputmode="decimal" enterkeyhint="next" autocomplete="off" value="${esc(weight)}" aria-label="Peso de ${esc(label)}"></label><label class="field"><span>Reps</span><input data-history-reps="${position}" type="number" min="1" max="99" step="1" inputmode="numeric" value="${field.reps}" aria-label="Reps de ${esc(label)}"></label>`
+        : `<label class="session-edit-check"><input type="checkbox" data-history-check="${position}" ${field.value ? 'checked' : ''} aria-label="Realizada, ${esc(label)}"><span>Realizada</span></label>`}</div>`;
+    }).join('');
+    return `<section class="session-edit-movement"><h3>${esc(movement.name)}</h3>${movement.reps ? `<p class="training-caption">Plan: ${esc(movement.reps)}</p>` : ''}${sets}</section>`;
+  }).join('')).join('');
+  openSheet(`<span class="eyebrow">Tu historial</span><h2>Editar sesión</h2><p>${fmtDate(original.startedAt)}</p>
+    ${!original.routineSnapshot ? '<p class="session-legacy">Sin copia del plan original. Solo se muestran los registros disponibles.</p>' : ''}
+    <form id="history-session-form" novalidate><details class="session-edit-details"><summary>Duración y nota<span aria-hidden="true">${ED_ICON.down}</span></summary>
+      <div class="field-grid"><label class="field"><span>Horas</span><input id="session-edit-hours" type="number" inputmode="numeric" min="0" max="24" step="1" required value="${Math.floor(totalMinutes / 60)}"></label><label class="field"><span>Minutos</span><input id="session-edit-minutes" type="number" inputmode="numeric" min="0" max="59" step="1" required value="${totalMinutes % 60}"></label></div>
+      <label class="field"><span>Nota</span><textarea id="session-edit-notes" rows="3" maxlength="5000">${esc(original.notes || '')}</textarea></label></details>
+      ${rows || '<p class="training-caption">Sin series guardadas.</p>'}<p class="correction-error" id="history-session-error" role="alert"></p>
+      <div class="sheet-form-actions"><button class="btn btn-primary" type="submit">Guardar cambios</button><button class="btn btn-ghost" type="button" id="history-session-cancel">Cancelar</button></div></form>`);
+  const form = $('#history-session-form');
+  const back = () => showSessionDetail(id);
+  form._onDiscard = back;
+  form.oninput = () => { form.dataset.dirty = 'true'; };
+  form.onchange = form.oninput;
+  $('#history-session-cancel').onclick = () => form.dataset.dirty === 'true' ? closeSheet() : back();
+  bindSessionCorrection(form, original, current => {
+    const invalid = form.querySelector(':invalid');
+    if (invalid) {
+      if (invalid.closest('details')) invalid.closest('details').open = true;
+      invalid.focus();
+      throw new Error('Revisa los valores marcados antes de guardar.');
+    }
+    const changes = { sets: [] };
+    fields.forEach((field, position) => {
+      const value = field.kind === 'weight' ? form.querySelector(`[data-history-weight="${position}"]`).value : form.querySelector(`[data-history-check="${position}"]`).checked;
+      const reps = field.kind === 'weight' ? form.querySelector(`[data-history-reps="${position}"]`).value : '';
+      if (value === field.value && reps === field.reps) return;
+      const change = { movementId: field.movementId, index: field.index, value };
+      if (field.kind === 'weight' && (reps !== field.reps || (!field.hasRecord && value.trim() !== '' && reps !== ''))) {
+        change.reps = reps;
+        change.repsSource = !field.hasRecord && field.value === '' && reps === field.reps && Number(reps) === field.planReps ? 'plan' : 'edited';
+      }
+      changes.sets.push(change);
+    });
+    const notes = $('#session-edit-notes').value;
+    const duration = Number($('#session-edit-hours').value) * 60 + Number($('#session-edit-minutes').value);
+    if (notes !== (original.notes || '')) changes.notes = notes;
+    if (duration !== totalMinutes) changes.durationMinutes = duration;
+    return correctSessionDetails(current, changes);
+  }, back);
 }
 
 async function openHistoryWeightEditor(id, movement, index, onSaved) {
@@ -3397,6 +3469,12 @@ function openSheet(html) {
 
 function closeSheet(accepted = false) {
   if (sheetBusy) return;
+  const editor = $('#history-session-form');
+  if (editor?.dataset.dirty === 'true' && accepted !== true) {
+    confirmSheet({ title: 'Descartar cambios', body: 'La sesión guardada todavía no cambió.', confirm: 'Descartar', cancel: 'Seguir editando', danger: true })
+      .then(discard => { if (discard) editor._onDiscard?.(); });
+    return;
+  }
   const backdrop = $('#sheet-backdrop');
   if (!backdrop.classList.contains('show')) return;
   // Soltar el foco antes de ocultar: si no, queda atrapado en contenido invisible.

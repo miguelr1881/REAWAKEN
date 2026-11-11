@@ -99,6 +99,80 @@ export function reviewSessionLoadUnits(session, sourceUnits, targetUnits = {}, a
   return updated;
 }
 
+export function correctSessionDetails(session, changes, at = Date.now()) {
+    if (!session?.finishedAt || session.deletedAt || !session.entries || !changes || typeof changes !== 'object' || Array.isArray(changes) ||
+      !Number.isFinite(at) || at <= 0 || (changes.sets !== undefined && !Array.isArray(changes.sets))) {
+    throw new Error('Solo puedes editar una sesion finalizada y disponible.');
+  }
+  const updated = structuredClone(session);
+  const targets = new Set();
+  for (const change of changes.sets || []) {
+    const { movementId, index } = change;
+    const originalValues = session.entries[movementId];
+    const matches = (session.routineSnapshot?.blocks || []).flatMap(block => block.movements
+      .filter(movement => movement.id === movementId).map(movement => ({ movement, block })));
+    if (typeof movementId !== 'string' || movementId.startsWith('_') || matches.length > 1 ||
+        (!matches.length && !Array.isArray(originalValues)) || !Number.isInteger(index) || index < 0 ||
+        index >= Math.max(matches[0]?.block.sets || 0, originalValues?.length || 0)) {
+      throw new Error('La serie debe pertenecer al registro original.');
+    }
+    const key = JSON.stringify([movementId, index]);
+    if (targets.has(key)) throw new Error('Una serie no puede corregirse dos veces en el mismo guardado.');
+    targets.add(key);
+    const kind = matches[0]?.movement.kind || (originalValues.some(value => typeof value === 'string') ? 'weight' : 'check');
+    const values = updated.entries[movementId] ||= [];
+    while (values.length <= index) values.push(kind === 'weight' ? '' : false);
+    if (kind === 'check') {
+      if (typeof change.value !== 'boolean') throw new Error('Indica si la serie fue realizada.');
+      values[index] = change.value;
+      continue;
+    }
+    const weight = typeof change.value === 'string' ? change.value.trim().replace(',', '.') : null;
+    if (weight === null || (weight !== '' && (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(weight) || !Number.isFinite(Number(weight))))) {
+      throw new Error('Introduce un peso valido o deja la serie vacia.');
+    }
+    const hasReps = Object.hasOwn(change, 'reps');
+    const reps = change.reps === '' || change.reps === null ? null : Number(change.reps);
+    if (hasReps && ((change.reps !== null && !['string', 'number'].includes(typeof change.reps)) ||
+      (reps !== null && (!Number.isInteger(reps) || reps < 1 || reps > 99)))) {
+      throw new Error('Las repeticiones deben ser un entero entre 1 y 99, o quedar vacias.');
+    }
+    values[index] = weight;
+    const tracking = updated.entries._training;
+    if (weight === '') {
+      if (tracking?.sets?.[movementId]) tracking.sets[movementId][index] = null;
+      if (tracking?.repDrafts?.[movementId]) delete tracking.repDrafts[movementId][index];
+      continue;
+    }
+    const previous = setRecord(session, movementId, index);
+    const choice = session.entries._training?.choices?.[movementId];
+    if (previous || choice || hasReps) {
+      const data = updated.entries._training ||= { version: 1 };
+      data.sets ||= {};
+      data.sets[movementId] ||= [];
+      data.sets[movementId][index] = {
+        ...(previous || choice || { variant: 'original', label: 'Habitual', unit: 'escala', step: 0 }),
+        load: Number(weight),
+        ...(!previous ? { reps: null, repsSource: null, rir: null, discomfort: false, recordedAt: at, timeSource: 'correction' } : {}),
+        ...(hasReps ? { reps, repsSource: reps === null ? null : change.repsSource === 'plan' ? 'plan' : 'edited' } : {}),
+        correctedAt: at
+      };
+      if (hasReps && data.repDrafts?.[movementId]) delete data.repDrafts[movementId][index];
+    }
+  }
+  if (Object.hasOwn(changes, 'notes')) {
+    if (typeof changes.notes !== 'string' || changes.notes.length > 5000) throw new Error('La nota admite hasta 5000 caracteres.');
+    updated.notes = changes.notes.trim();
+  }
+  if (Object.hasOwn(changes, 'durationMinutes')) {
+    if (!Number.isInteger(changes.durationMinutes) || changes.durationMinutes < 1 || changes.durationMinutes > 1440) {
+      throw new Error('Introduce una duracion entre 1 minuto y 24 horas.');
+    }
+    updated.entries._durationMinutes = changes.durationMinutes;
+  }
+  return updated;
+}
+
 export function correctSessionWeight(session, movementId, index, value) {
   const values = session.entries?.[movementId];
   const movement = session.routineSnapshot?.blocks.flatMap(block => block.movements).find(item => item.id === movementId);
